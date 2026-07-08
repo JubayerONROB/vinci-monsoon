@@ -1,0 +1,79 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Gate publishing on the offline suite. We install only the light deps:
+      # llama-cpp-python needs a long native compile and the offline tests are
+      # designed to run on the heuristic backend without it.
+      - name: Offline tests
+        run: |
+          pip install requests PyYAML pytest
+          python tests/run_eval.py
+          pytest tests/test_schema.py -q
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR requires a lowercase repository path.
+      - name: Build and push (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/jubayeronrob/vinci-monsoon:latest
+
+      # Run the freshly pushed image exactly like the grading harness:
+      # tasks mounted at /input, results expected at /output/results.json.
+      # No Fireworks env vars are set, so the agent must degrade gracefully
+      # to local-only answers (the valid ZERO_API_CALLS path).
+      - name: Smoke-run image against mock tasks
+        run: |
+          mkdir -p "$PWD/out"
+          docker run --rm \
+            -v "$PWD/tests/mock_tasks.json:/input/tasks.json:ro" \
+            -v "$PWD/out:/output" \
+            ghcr.io/jubayeronrob/vinci-monsoon:latest
+
+      - name: Validate results schema
+        run: |
+          python - <<'EOF'
+          import json, sys
+          with open("out/results.json", encoding="utf-8") as fh:
+              results = json.load(fh)
+          assert isinstance(results, list) and results, "results.json must be a non-empty array"
+          for e in results:
+              assert set(e) == {"task_id", "answer"}, f"bad keys: {e.keys()}"
+              assert isinstance(e["task_id"], str) and e["task_id"]
+              assert isinstance(e["answer"], str) and e["answer"].strip(), f"empty answer: {e['task_id']}"
+          print(f"OK: {len(results)} valid results")
+          EOF
+
+      - name: Report compressed image size
+        run: |
+          SIZE_BYTES=$(docker manifest inspect ghcr.io/jubayeronrob/vinci-monsoon:latest \
+            | jq '[.layers[].size] | add')
+          echo "Compressed image size: $(numfmt --to=iec "$SIZE_BYTES") ($SIZE_BYTES bytes)"
+          echo "Hackathon cap: 10GB compressed"
