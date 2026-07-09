@@ -64,6 +64,6 @@ limits:
   # (minimax-m3) can blow the request timeout on hard logic/math; a tighter
   # cap makes generation finish inside the window. Other roles keep 512.
   remote_max_tokens_by_role:
-    reasoning: 400
+    reasoning: 600   # raised from 400 so minimax-m3 math finishes cleanly
   remote_timeout_seconds: 25   # per-request; keeps clear margin under 30s cap
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only

@@ -86,15 +86,19 @@ class FireworksClient:
             # Tokens were consumed even if the answer is unusable — count them.
             self.total_tokens += data.get("usage", {}).get("total_tokens", 0)
 
-            if not text or finish == "length":
+            if not text:
                 # Hidden-reasoning models can burn the whole max_tokens budget
-                # and return empty/truncated content with finish_reason=length.
-                # A retry would just repeat it and waste another timeout —
-                # fail IMMEDIATELY so the caller falls back locally.
+                # and return EMPTY content with finish_reason=length. A retry
+                # would just repeat it and waste another timeout — fail
+                # IMMEDIATELY so the caller falls back locally.
                 raise FireworksError(
-                    f"unusable completion (finish_reason={finish}, "
-                    f"empty={not text}) — not retried"
+                    f"empty completion (finish_reason={finish}) — not retried"
                 )
+            if finish == "length":
+                # Truncated but NON-EMPTY: usable — accept it rather than
+                # discard a real answer and burn local-fallback time.
+                print("fireworks: truncated completion accepted "
+                      "(finish_reason=length)", flush=True)
 
             self.calls += 1
             return text
