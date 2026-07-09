@@ -99,12 +99,16 @@ class Router:
             answer = self._local_answer(task_prompt)
             return answer, meta
 
+        role = self.cfg["category_roles"].get(category, "general")
+        max_tokens = self.limits.get("remote_max_tokens_by_role", {}).get(
+            role, self.limits.get("remote_max_tokens", 512)
+        )
         try:
             answer = self.fireworks.chat(
                 model=model_id,
                 system=REMOTE_SYSTEM,
                 user=remote_user_prompt(category, task_prompt),
-                max_tokens=self.limits.get("remote_max_tokens", 512),
+                max_tokens=max_tokens,
                 timeout=self.limits.get("remote_timeout_seconds", 25),
             )
             meta.update(route="remote", model=model_id)

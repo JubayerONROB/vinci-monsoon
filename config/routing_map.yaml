@@ -57,5 +57,10 @@ limits:
   classify_max_tokens: 64      # stage-1 JSON is tiny; keep latency low
   local_max_tokens: 300        # local answers cost 0 tokens but must beat 30s
   remote_max_tokens: 512       # cap Fireworks output tokens (they score!)
-  remote_timeout_seconds: 25   # hard cap, stays under the 30s per-request rule
+  # Per-ROLE output caps override remote_max_tokens. Long-reasoning models
+  # (minimax-m3) can blow the request timeout on hard logic/math; a tighter
+  # cap makes generation finish inside the window. Other roles keep 512.
+  remote_max_tokens_by_role:
+    reasoning: 400
+  remote_timeout_seconds: 28   # raised from 25; still under the 30s cap
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only
