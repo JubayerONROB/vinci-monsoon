@@ -37,15 +37,16 @@ role_model_hints:
 #   lenient -> local whenever difficulty == shallow (low confidence tolerated)
 #   always  -> always escalate to Fireworks, never answer locally
 # Small local models are weak at multi-step math / logic / code, so those
-# categories stay "strict" (they escalate unless the classifier is sure the
-# task is trivial). Cheap classification-style categories are "lenient".
+# four categories are FORCE-REMOTE ("always"): they escalate to Fireworks
+# unconditionally, ignoring the local classifier's difficulty/confidence.
+# Cheap classification-style categories stay local-first ("lenient").
 escalation_policy:
   default: strict
   overrides:
-    math_reasoning: strict
-    logical_reasoning: strict
-    code_debugging: strict
-    code_generation: strict
+    math_reasoning: always      # force_remote
+    logical_reasoning: always   # force_remote
+    code_debugging: always      # force_remote
+    code_generation: always     # force_remote
     factual_knowledge: lenient
     sentiment: lenient
     summarization: lenient
