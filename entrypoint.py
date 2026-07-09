@@ -58,6 +58,8 @@ def main() -> int:
     local_model = get_local_model()
     print(f"local model backend: {local_model.backend}", flush=True)
     router = Router(local_model, FireworksClient())
+    # Resolved role -> model map (from runtime ALLOWED_MODELS, never hardcoded)
+    print(f"resolved model map: {router.resolved_map()}", flush=True)
 
     results = []
     budget_hit = False
@@ -82,6 +84,16 @@ def main() -> int:
             answer = "No answer available."
         results.append({"task_id": task_id, "answer": answer})
         print(f"[{task_id}] route={meta.get('route')} model={meta.get('model', '-')}", flush=True)
+        # Per-task diagnostic (stderr, non-sensitive): lets a failed grading
+        # run be diagnosed per category instead of tuning blind.
+        cat = meta.get("decision", {}).get("intent", "?")
+        print(
+            f"DIAG {task_id} | {cat} | {meta.get('route')} | "
+            f"{meta.get('model', '-')} | finish={meta.get('finish_reason', '-')} | "
+            f"answer_len={len(answer)} | "
+            f"truncated={'yes' if meta.get('truncated') else 'no'}",
+            file=sys.stderr, flush=True,
+        )
 
     out = Path(OUTPUT_PATH)
     out.parent.mkdir(parents=True, exist_ok=True)

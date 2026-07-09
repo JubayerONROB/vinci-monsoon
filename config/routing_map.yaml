@@ -28,10 +28,12 @@ category_roles:
 # Set for the published Track 1 list: minimax-m3, kimi-k2p7-code,
 # gemma-4-31b-it, gemma-4-26b-a4b-it, gemma-4-31b-it-nvfp4.
 # Gemma variants are deliberately NOT hinted (on-demand, ~$7/hr idle).
+# Short substrings ("kimi", "minimax") so a platform-side ID rev (e.g. a
+# version suffix) still resolves; never full-ID-hardcoded.
 role_model_hints:
-  reasoning: ["minimax-m3"]
-  code: ["kimi-k2p7-code"]
-  general: ["minimax-m3"]
+  reasoning: ["minimax"]
+  code: ["kimi"]
+  general: ["minimax"]
 
 # --- Escalation policy per category -----------------------------------------
 # Decides when we trust the LOCAL model's answer (0 tokens) vs escalate to
@@ -64,6 +66,16 @@ limits:
   # (minimax-m3) can blow the request timeout on hard logic/math; a tighter
   # cap makes generation finish inside the window. Other roles keep 512.
   remote_max_tokens_by_role:
-    reasoning: 600   # raised from 400 so minimax-m3 math finishes cleanly
+    reasoning: 600   # minimax-m3 math finishes cleanly at 600
+    code: 700        # raised from 512: 3 code/logic answers truncated last run
   remote_timeout_seconds: 25   # per-request; keeps clear margin under 30s cap
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only
+
+# --- Escalation aggressiveness ------------------------------------------------
+thresholds:
+  # Categorical classifier confidence maps to a score (high=0.95, low=0.50);
+  # it must EXCEED this to stay local. 0.90 means only confident-high stays.
+  local_confidence_threshold: 0.90
+  # Escalate any prompt containing code syntax, math, or step-by-step cues,
+  # even when the classifier calls it easy.
+  aggressive_escalation: true

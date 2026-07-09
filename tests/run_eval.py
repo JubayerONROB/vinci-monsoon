@@ -48,6 +48,7 @@ class MockFireworks:
     def __init__(self):
         self.total_tokens = 0
         self.calls = 0
+        self.last_finish_reason = None
 
     @property
     def configured(self) -> bool:
@@ -57,6 +58,7 @@ class MockFireworks:
         # Rough token simulation: ~1 token per 4 chars of input + 60 output.
         self.total_tokens += (len(system) + len(user)) // 4 + 60
         self.calls += 1
+        self.last_finish_reason = "stop"
         return f"[mock answer from {model.split('/')[-1]}]"
 
 

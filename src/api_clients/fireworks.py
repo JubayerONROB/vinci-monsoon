@@ -27,6 +27,7 @@ class FireworksClient:
         self.base_url = os.environ.get("FIREWORKS_BASE_URL", "").rstrip("/")
         self.total_tokens = 0   # prompt + completion tokens as reported by API
         self.calls = 0
+        self.last_finish_reason = None  # finish_reason of the last success
 
     @property
     def configured(self) -> bool:
@@ -101,5 +102,6 @@ class FireworksClient:
                       "(finish_reason=length)", flush=True)
 
             self.calls += 1
+            self.last_finish_reason = finish
             return text
         raise FireworksError(f"Fireworks call failed after retry: {last_err}")
