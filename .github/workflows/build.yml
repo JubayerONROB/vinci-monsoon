@@ -3,6 +3,24 @@ name: build
 on:
   push:
     branches: [main]
+  # Manual trigger for the live Fireworks integration test (integration-test
+  # job below). NOTE: the defaults are PLACEHOLDERS for plumbing validation
+  # only — the REAL FIREWORKS_BASE_URL / ALLOWED_MODELS are injected by the
+  # grading harness at evaluation time. On launch day, paste the published
+  # values here when dispatching AND update role_model_hints in
+  # config/routing_map.yaml.
+  workflow_dispatch:
+    inputs:
+      fireworks_base_url:
+        description: "Fireworks base URL (PLACEHOLDER default: public API)"
+        type: string
+        required: false
+        default: "https://api.fireworks.ai/inference/v1"
+      allowed_models:
+        description: "Comma-separated model IDs (PLACEHOLDER default)"
+        type: string
+        required: false
+        default: "accounts/fireworks/models/llama-v3p1-8b-instruct"
 
 permissions:
   contents: read
@@ -10,6 +28,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,3 +104,70 @@ jobs:
           fi
           echo "Compressed image size: $(numfmt --to=iec "$SIZE_BYTES") ($SIZE_BYTES bytes)"
           echo "Hackathon cap: 10GB compressed"
+
+  # ==========================================================================
+  # MANUAL live Fireworks integration test — runs ONLY via workflow_dispatch
+  # ("Run workflow" button), never on push, because it spends real tokens.
+  # It validates PLUMBING (auth, base URL routing, graceful fallback), NOT the
+  # real routing map: the default ALLOWED_MODELS input is a PLACEHOLDER.
+  # The API key is referenced only as a secret and passed to the container BY
+  # NAME (-e FIREWORKS_API_KEY) so its value never appears in logs.
+  # ==========================================================================
+  integration-test:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+      FIREWORKS_BASE_URL: ${{ inputs.fireworks_base_url }}
+      ALLOWED_MODELS: ${{ inputs.allowed_models }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull published image (no rebuild)
+        run: docker pull ghcr.io/jubayeronrob/vinci-monsoon:latest
+
+      - name: Run container with live env (vars passed BY NAME)
+        run: |
+          mkdir -p "$PWD/out"
+          docker run --rm \
+            -e FIREWORKS_API_KEY -e FIREWORKS_BASE_URL -e ALLOWED_MODELS \
+            -v "$PWD/tests/mock_tasks.json:/input/tasks.json:ro" \
+            -v "$PWD/out:/output" \
+            ghcr.io/jubayeronrob/vinci-monsoon:latest
+
+      - name: Validate container results schema
+        run: |
+          python - <<'EOF'
+          import json
+          with open("out/results.json", encoding="utf-8") as fh:
+              results = json.load(fh)
+          assert isinstance(results, list) and results, "results.json must be a non-empty array"
+          for e in results:
+              assert set(e) == {"task_id", "answer"}, f"bad keys: {sorted(e)}"
+              assert isinstance(e["task_id"], str) and e["task_id"]
+              assert isinstance(e["answer"], str) and e["answer"].strip(), f"empty answer: {e['task_id']}"
+          print(f"OK: {len(results)} valid results")
+          EOF
+
+      # Non-sensitive summary only: counts and booleans, never env values.
+      # real_fireworks_success=true means a genuine completion came back;
+      # false + fallback>0 with placeholder models usually means an expected
+      # 404 -> clean local fallback (still a plumbing PASS).
+      - name: Live eval harness (EVAL_LIVE=1)
+        run: |
+          pip install requests PyYAML
+          EVAL_LIVE=1 python tests/run_eval.py
