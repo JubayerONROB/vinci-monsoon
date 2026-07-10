@@ -55,10 +55,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute short commit SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       # GHCR requires a lowercase repository path.
       # Two tags per build: :latest is the moving submission pointer, and
-      # :<commit-sha> is an immutable version so every graded image remains
-      # pullable and traceable to its exact commit.
+      # :<short-sha> (7 chars) is an immutable version so every graded image
+      # remains pullable and traceable to its exact commit.
       - name: Build and push (linux/amd64)
         uses: docker/build-push-action@v6
         with:
@@ -67,7 +71,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/jubayeronrob/vinci-monsoon:latest
-            ghcr.io/jubayeronrob/vinci-monsoon:${{ github.sha }}
+            ghcr.io/jubayeronrob/vinci-monsoon:${{ steps.sha.outputs.short }}
 
       # Run the freshly pushed image exactly like the grading harness:
       # tasks mounted at /input, results expected at /output/results.json.
