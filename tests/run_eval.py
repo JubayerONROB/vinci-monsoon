@@ -31,9 +31,8 @@ sys.path.insert(0, str(ROOT))
 # offline. No-op when the environment already provides ALLOWED_MODELS.
 os.environ.setdefault(
     "ALLOWED_MODELS",
-    "accounts/fireworks/models/gemma-3-27b-it,"
-    "accounts/fireworks/models/minimax-m2,"
-    "accounts/fireworks/models/kimi-k2-instruct",
+    "accounts/fireworks/models/minimax-m3,"
+    "accounts/fireworks/models/kimi-k2p7-code",
 )
 
 from src.local_models.loader import get_local_model      # noqa: E402
@@ -61,7 +60,8 @@ class MockFireworks:
     def configured(self) -> bool:
         return True
 
-    def chat(self, model, system, user, max_tokens=512, timeout=25.0) -> str:
+    def chat(self, model, system, user, max_tokens=512, timeout=25.0,
+             reasoning_effort="none") -> str:
         import time as _time
 
         from src.api_clients.fireworks import FireworksError

@@ -199,6 +199,10 @@ class Router:
                 # alternate must never push a task past the budget.
                 break
             call_t0 = time.time()
+            # minimax on the reasoning role gets "low" effort (real reasoning
+            # for math/logic); everything else stays "none" for speed and
+            # guaranteed non-empty content.
+            effort = "low" if (role == "reasoning" and "minimax" in model_id.lower()) else "none"
             try:
                 answer = self.fireworks.chat(
                     model=model_id,
@@ -206,6 +210,7 @@ class Router:
                     user=remote_user_prompt(category, task_prompt),
                     max_tokens=max_tokens,
                     timeout=min(req_timeout, remaining),
+                    reasoning_effort=effort,
                 )
                 call_secs = round(time.time() - call_t0, 2)
                 if idx == 0:

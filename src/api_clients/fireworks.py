@@ -37,7 +37,8 @@ class FireworksClient:
         return bool(self.api_key and self.base_url)
 
     def chat(self, model: str, system: str, user: str,
-             max_tokens: int = 512, timeout: float = 25.0) -> str:
+             max_tokens: int = 512, timeout: float = 25.0,
+             reasoning_effort: str = "none") -> str:
         if not self.configured:
             raise FireworksError("FIREWORKS_API_KEY / FIREWORKS_BASE_URL not set")
 
@@ -51,11 +52,12 @@ class FireworksClient:
             "max_tokens": max_tokens,
             "temperature": 0.2,
         }
-        # Disable hidden reasoning: thinking models (minimax-m3) otherwise
-        # burn the token budget reasoning and return empty/truncated content
-        # after ~25s. Dropped per-model if the API rejects the param.
-        if model not in self._no_reasoning_param:
-            payload["reasoning_effort"] = "none"
+        # reasoning_effort control: "none" keeps thinking models fast and
+        # non-empty (general lane, code lane); the dispatcher passes "low"
+        # only for minimax on the reasoning role (math/logic), where some
+        # actual reasoning buys accuracy. Dropped per-model on 400/422.
+        if reasoning_effort and model not in self._no_reasoning_param:
+            payload["reasoning_effort"] = reasoning_effort
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -84,7 +86,8 @@ class FireworksClient:
                 # the model is now in the reject set, so no param next time).
                 self._no_reasoning_param.add(model)
                 return self.chat(model=model, system=system, user=user,
-                                 max_tokens=max_tokens, timeout=timeout)
+                                 max_tokens=max_tokens, timeout=timeout,
+                                 reasoning_effort=reasoning_effort)
             if resp.status_code >= 400:
                 # Auth / unknown model / bad request: permanent. Retrying
                 # would waste another full timeout — fail fast, caller

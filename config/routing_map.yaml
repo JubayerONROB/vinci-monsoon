@@ -31,9 +31,9 @@ category_roles:
 # Short substrings ("kimi", "minimax") so a platform-side ID rev (e.g. a
 # version suffix) still resolves; never full-ID-hardcoded.
 role_model_hints:
-  reasoning: ["minimax"]
-  code: ["kimi"]
-  general: ["minimax"]
+  reasoning: ["minimax-m3", "minimax"]   # math_reasoning, logical_reasoning
+  code: ["kimi-k2p7-code", "kimi"]       # code_debugging, code_generation
+  general: ["minimax-m3", "minimax"]     # factual, sentiment, summarization, ner
 
 # --- Escalation policy per category -----------------------------------------
 # Decides when we trust the LOCAL model's answer (0 tokens) vs escalate to

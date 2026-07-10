@@ -17,3 +17,5 @@ models/
 # Local run artifacts
 out/
 tests/out_results.json
+tests/diag.json
+diag.log

@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.api_clients.fireworks import FireworksClient          # noqa: E402
 from src.local_models.loader import get_local_model            # noqa: E402
 from src.router.dispatch import Router                         # noqa: E402
+from src.router.formatting import format_answer                # noqa: E402
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
@@ -36,6 +37,20 @@ OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 HARD_CEILING_SECONDS = float(os.environ.get("HARD_CEILING_SECONDS", "540"))
 LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "2"))
 MIN_CEILING_SECONDS = 300.0
+
+
+def _write_outputs(results: list, diag_rows: list) -> None:
+    """Write results.json (clean harness schema) AND diag.json beside it.
+
+    Shared flush path: called on the normal exit AND from the crash handler,
+    so diagnostics survive even a partially-failed run.
+    """
+    out = Path(OUTPUT_PATH)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(results, fh, ensure_ascii=False, indent=1)
+    with open(out.parent / "diag.json", "w", encoding="utf-8") as fh:
+        json.dump(diag_rows, fh, ensure_ascii=False, indent=1)
 
 
 def _fallback_answer(prompt: str, router: Router) -> str:
@@ -70,6 +85,24 @@ def main() -> int:
         )
 
     results = []
+    diag_rows = []
+    try:
+        _route_all(tasks, router, results, diag_rows, start)
+    finally:
+        # Same flush path for success and crash: results.json + diag.json
+        # are emitted no matter what happened mid-run.
+        _write_outputs(results, diag_rows)
+
+    elapsed = time.time() - start
+    print(
+        f"done: {len(results)} tasks in {elapsed:.1f}s | "
+        f"fireworks calls={router.fireworks.calls} tokens={router.fireworks.total_tokens}",
+        flush=True,
+    )
+    return 0
+
+
+def _route_all(tasks, router, results, diag_rows, start):
     budget_hit = False
     for idx, task in enumerate(tasks):
         task_id = task.get("task_id", "")
@@ -94,14 +127,28 @@ def main() -> int:
                 answer, meta = router.route(prompt)
         except Exception as exc:  # one bad task must never sink the run
             answer, meta = _fallback_answer(prompt, router), {"route": "error", "error": str(exc)}
+        cat = meta.get("decision", {}).get("intent", "?")
+        if isinstance(answer, str) and answer.strip():
+            answer = format_answer(cat, answer)
         if not isinstance(answer, str) or not answer.strip():
             answer = "No answer available."
         results.append({"task_id": task_id, "answer": answer})
         print(f"[{task_id}] route={meta.get('route')} model={meta.get('model', '-')}", flush=True)
-        # Per-task diagnostic (stderr, non-sensitive): lets a failed grading
-        # run be diagnosed per category instead of tuning blind.
-        cat = meta.get("decision", {}).get("intent", "?")
+        # Per-task diagnostic (stderr + /output/diag.json, non-sensitive):
+        # lets a failed grading run be diagnosed instead of tuning blind.
         t = meta.get("timing", {})
+        diag_rows.append({
+            "task_id": task_id,
+            "detected_category": cat,
+            "route": meta.get("route"),
+            "model_used": meta.get("model", "-"),
+            "finish_reason": meta.get("finish_reason", "-"),
+            "answer_len": len(answer),
+            "truncated": bool(meta.get("truncated")),
+            "primary_call_secs": t.get("primary_secs", 0),
+            "alternate_fired": bool(t.get("alternate_fired")),
+            "total_task_secs": t.get("total_secs", 0),
+        })
         print(
             f"DIAG {task_id} | {cat} | {meta.get('route')} | "
             f"{meta.get('model', '-')} | finish={meta.get('finish_reason', '-')} | "
@@ -112,19 +159,6 @@ def main() -> int:
             f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'})",
             file=sys.stderr, flush=True,
         )
-
-    out = Path(OUTPUT_PATH)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(results, fh, ensure_ascii=False, indent=1)
-
-    elapsed = time.time() - start
-    print(
-        f"done: {len(results)} tasks in {elapsed:.1f}s | "
-        f"fireworks calls={router.fireworks.calls} tokens={router.fireworks.total_tokens}",
-        flush=True,
-    )
-    return 0
 
 
 if __name__ == "__main__":
