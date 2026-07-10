@@ -28,12 +28,14 @@ from src.router.dispatch import Router                         # noqa: E402
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 
-# Soft ceiling on total runtime, configurable via env. Once elapsed time
-# crosses it we STOP escalating to Fireworks and answer every remaining task
-# with the local model only: a possibly-weaker local answer always beats a
-# TIMEOUT, which zeros the whole submission. 480s leaves 2 minutes of margin
-# inside the 10-minute hard cap.
-TIME_BUDGET_SECONDS = float(os.environ.get("TIME_BUDGET_SECONDS", "480"))
+# Dynamic global time guard. Before each task we compute a ceiling that
+# leaves enough runway to answer ALL remaining tasks locally (no network):
+#   ceiling = 540 - remaining_tasks * ~2s, floored at 300s.
+# Crossing it switches every remaining task to LOCAL-ONLY, guaranteeing
+# results.json is written and the container exits well under the 10-min cap.
+HARD_CEILING_SECONDS = float(os.environ.get("HARD_CEILING_SECONDS", "540"))
+LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "2"))
+MIN_CEILING_SECONDS = 300.0
 
 
 def _fallback_answer(prompt: str, router: Router) -> str:
@@ -69,16 +71,22 @@ def main() -> int:
 
     results = []
     budget_hit = False
-    for task in tasks:
+    for idx, task in enumerate(tasks):
         task_id = task.get("task_id", "")
         prompt = task.get("prompt", "")
+        remaining_tasks = len(tasks) - idx
+        ceiling = max(
+            HARD_CEILING_SECONDS - remaining_tasks * LOCAL_EST_SECONDS,
+            MIN_CEILING_SECONDS,
+        )
         try:
-            if time.time() - start > TIME_BUDGET_SECONDS:
+            if budget_hit or time.time() - start > ceiling:
                 if not budget_hit:
                     budget_hit = True
                     print(
-                        f"TIME BUDGET {TIME_BUDGET_SECONDS:.0f}s exceeded — "
-                        "answering all remaining tasks locally (no more API calls)",
+                        f"TIME CUTOVER at {time.time() - start:.0f}s "
+                        f"(ceiling {ceiling:.0f}s): forcing the remaining "
+                        f"{remaining_tasks} task(s) LOCAL-ONLY, no more API calls",
                         flush=True,
                     )
                 answer, meta = _fallback_answer(prompt, router), {"route": "deadline_local"}
@@ -93,11 +101,15 @@ def main() -> int:
         # Per-task diagnostic (stderr, non-sensitive): lets a failed grading
         # run be diagnosed per category instead of tuning blind.
         cat = meta.get("decision", {}).get("intent", "?")
+        t = meta.get("timing", {})
         print(
             f"DIAG {task_id} | {cat} | {meta.get('route')} | "
             f"{meta.get('model', '-')} | finish={meta.get('finish_reason', '-')} | "
             f"answer_len={len(answer)} | "
-            f"truncated={'yes' if meta.get('truncated') else 'no'}",
+            f"truncated={'yes' if meta.get('truncated') else 'no'} | "
+            f"task_secs={t.get('total_secs', 0)} "
+            f"(primary={t.get('primary_secs', 0)}s, "
+            f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'})",
             file=sys.stderr, flush=True,
         )
 

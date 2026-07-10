@@ -63,7 +63,9 @@ escalation_policy:
 # --- Generation limits -------------------------------------------------------
 limits:
   classify_max_tokens: 64      # stage-1 JSON is tiny; keep latency low
-  local_max_tokens: 300        # local answers cost 0 tokens but must beat 30s
+  local_max_tokens: 180        # local answers cost 0 tokens but MUST be fast:
+                               # the 2-vCPU grading box generates ~2-4x slower
+                               # than CI, and 300 tokens there risks the 30s cap
   remote_max_tokens: 512       # cap Fireworks output tokens (they score!)
   # Per-ROLE output caps override remote_max_tokens. Long-reasoning models
   # (minimax-m3) can blow the request timeout on hard logic/math; a tighter
@@ -71,7 +73,8 @@ limits:
   remote_max_tokens_by_role:
     reasoning: 600   # minimax-m3 math finishes cleanly at 600
     code: 700        # raised from 512: 3 code/logic answers truncated last run
-  remote_timeout_seconds: 25   # per-request; keeps clear margin under 30s cap
+  remote_timeout_seconds: 18   # per-request; a hung call can't eat the task budget
+  per_task_budget_seconds: 20  # HARD cap on all remote attempts per task combined
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only
 
 # --- Escalation aggressiveness ------------------------------------------------

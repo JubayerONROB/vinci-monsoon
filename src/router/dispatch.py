@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -131,8 +132,11 @@ class Router:
         conf = _CONFIDENCE_SCORE.get(decision.get("confidence"), 0.0)
         if conf <= self.thresholds.get("local_confidence_threshold", 0.90):
             return False
-        # Aggressive cue check runs LAST, before accepting a local answer.
-        if self.thresholds.get("aggressive_escalation", True) and \
+        # Aggressive cue check runs LAST, before accepting a local answer —
+        # but NOT for sentiment/summarization/ner: a stray digit or code
+        # fragment inside a review/passage must not escalate those.
+        if decision["intent"] not in ("sentiment", "summarization", "ner") and \
+                self.thresholds.get("aggressive_escalation", True) and \
                 self.aggressive_override(prompt):
             return False
         return True
@@ -141,7 +145,17 @@ class Router:
     # full pipeline for one task                                         #
     # ------------------------------------------------------------------ #
     def route(self, task_prompt: str) -> tuple[str, dict]:
-        """Return (answer, meta). meta records how the task was routed."""
+        """Return (answer, meta). meta records how the task was routed,
+        including per-call wall-clock timing.
+
+        HARD per-task budget: all remote attempts combined must fit inside
+        per_task_budget_seconds (~20s). Each request's timeout is clamped to
+        the budget remainder, so a slow primary consumes the budget and the
+        alternate is skipped — one slow task can never sink the run.
+        """
+        t_start = time.time()
+        timing = {"primary_secs": 0.0, "alternate_fired": False,
+                  "alternate_secs": 0.0, "total_secs": 0.0}
         decision = classify_task(
             task_prompt, self.local,
             max_chars=self.limits.get("classify_prompt_chars", 1500),
@@ -152,44 +166,72 @@ class Router:
             "decision": decision, "route": "local", "model": "local",
             "finish_reason": "-", "truncated": False,
             "escalation_cue": self.aggressive_override(task_prompt) or "-",
+            "timing": timing,
         }
 
+        def _finish_local(route: str = "local", err: Optional[str] = None) -> tuple[str, dict]:
+            if err:
+                meta.update(route=route, model="local", error=err)
+            answer = self._local_answer(task_prompt)
+            timing["total_secs"] = round(time.time() - t_start, 2)
+            return answer, meta
+
         if self.should_answer_locally(decision, task_prompt):
-            return self._local_answer(task_prompt), meta
+            return _finish_local()
 
         primary = self.resolve_model(category)
         if primary is None:  # ALLOWED_MODELS empty: local is all we have
-            return self._local_answer(task_prompt), meta
+            return _finish_local()
 
         role = self.cfg["category_roles"].get(category, "general")
         max_tokens = self.limits.get("remote_max_tokens_by_role", {}).get(
             role, self.limits.get("remote_max_tokens", 512)
         )
+        task_budget = self.limits.get("per_task_budget_seconds", 20)
+        req_timeout = self.limits.get("remote_timeout_seconds", 18)
         # Primary model, then the first DIFFERENT allowed model, then local.
         alternate = next((m for m in self.allowed if m != primary), None)
         last_err: Optional[Exception] = None
-        for model_id in [m for m in (primary, alternate) if m]:
+        for idx, model_id in enumerate([m for m in (primary, alternate) if m]):
+            remaining = task_budget - (time.time() - t_start)
+            if remaining < 3:
+                # Not enough runway for another remote attempt — the
+                # alternate must never push a task past the budget.
+                break
+            call_t0 = time.time()
             try:
                 answer = self.fireworks.chat(
                     model=model_id,
                     system=REMOTE_SYSTEM,
                     user=remote_user_prompt(category, task_prompt),
                     max_tokens=max_tokens,
-                    timeout=self.limits.get("remote_timeout_seconds", 25),
+                    timeout=min(req_timeout, remaining),
                 )
+                call_secs = round(time.time() - call_t0, 2)
+                if idx == 0:
+                    timing["primary_secs"] = call_secs
+                else:
+                    timing["alternate_fired"] = True
+                    timing["alternate_secs"] = call_secs
                 finish = getattr(self.fireworks, "last_finish_reason", None)
                 meta.update(
                     route="remote", model=model_id,
                     finish_reason=finish or "?",
                     truncated=finish == "length",
                 )
+                timing["total_secs"] = round(time.time() - t_start, 2)
                 return answer, meta
             except FireworksError as exc:
+                call_secs = round(time.time() - call_t0, 2)
+                if idx == 0:
+                    timing["primary_secs"] = call_secs
+                else:
+                    timing["alternate_fired"] = True
+                    timing["alternate_secs"] = call_secs
                 last_err = exc
 
-        # Both remote attempts failed — degrade to local, never crash.
-        meta.update(route="local_fallback", model="local", error=str(last_err))
-        return self._local_answer(task_prompt), meta
+        # Remote attempts failed or budget exhausted — degrade to local.
+        return _finish_local("local_fallback", str(last_err) if last_err else "task budget exhausted")
 
     def _local_answer(self, task_prompt: str) -> str:
         return self.local.generate(

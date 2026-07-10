@@ -43,18 +43,34 @@ MOCK_TASKS = ROOT / "tests" / "mock_tasks.json"
 
 
 class MockFireworks:
-    """Stub Fireworks client: canned answer + simulated token accounting."""
+    """Stub Fireworks client: canned answer + simulated token accounting.
+
+    SLOW_MOCK=1 makes each call sleep ~2s (simulating real API latency) and
+    the FIRST minimax call fail (exercising the alternate-model path), so the
+    per-task timing/budget logic can be observed offline.
+    """
 
     def __init__(self):
         self.total_tokens = 0
         self.calls = 0
         self.last_finish_reason = None
+        self.slow = os.environ.get("SLOW_MOCK") == "1"
+        self._failed_once = False
 
     @property
     def configured(self) -> bool:
         return True
 
     def chat(self, model, system, user, max_tokens=512, timeout=25.0) -> str:
+        import time as _time
+
+        from src.api_clients.fireworks import FireworksError
+
+        if self.slow:
+            _time.sleep(min(2.0, timeout))
+            if "minimax" in model and not self._failed_once:
+                self._failed_once = True
+                raise FireworksError("simulated transient failure (SLOW_MOCK)")
         # Rough token simulation: ~1 token per 4 chars of input + 60 output.
         self.total_tokens += (len(system) + len(user)) // 4 + 60
         self.calls += 1
@@ -83,9 +99,16 @@ def run_offline_eval(output_path: Path | None = None, live: bool | None = None) 
     rows = defaultdict(lambda: {"local": 0, "remote": 0, "model": "-"})
     route_counts = {"local": 0, "remote": 0, "local_fallback": 0}
     errors: list[str] = []
+    timing_rows: list[tuple] = []
     for task in tasks:
         answer, meta = router.route(task["prompt"])
         results.append({"task_id": task["task_id"], "answer": answer})
+        t = meta.get("timing", {})
+        timing_rows.append((
+            task["task_id"], meta["decision"]["intent"], meta.get("route"),
+            t.get("primary_secs", 0), t.get("alternate_fired", False),
+            t.get("alternate_secs", 0), t.get("total_secs", 0),
+        ))
         route = meta.get("route", "local")
         route_counts[route] = route_counts.get(route, 0) + 1
         if meta.get("error"):
@@ -116,7 +139,17 @@ def run_offline_eval(output_path: Path | None = None, live: bool | None = None) 
     )
     for line in errors:
         print(f"remote failure -> handled fallback: {line}")
-    print()
+
+    # --- per-task timing table -------------------------------------------
+    print(f"\n{'task_id':<15} {'category':<19} {'route':<15} "
+          f"{'primary_s':>9} {'alt?':>5} {'alt_s':>6} {'total_s':>8}")
+    print("-" * 82)
+    for tid, cat, route, p, alt, alts, tot in timing_rows:
+        print(f"{tid:<15} {cat:<19} {route:<15} {p:>9} "
+              f"{'yes' if alt else 'no':>5} {alts:>6} {tot:>8}")
+    slowest = sorted(timing_rows, key=lambda r: r[6], reverse=True)[:3]
+    print("3 slowest:", ", ".join(f"{r[0]} ({r[6]}s)" for r in slowest))
+    print(f"alternate fired on {sum(1 for r in timing_rows if r[4])} task(s)\n")
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
