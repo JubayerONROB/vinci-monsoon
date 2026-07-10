@@ -28,6 +28,9 @@ class FireworksClient:
         self.total_tokens = 0   # prompt + completion tokens as reported by API
         self.calls = 0
         self.last_finish_reason = None  # finish_reason of the last success
+        # Models that rejected the reasoning_effort param (400/422): we drop
+        # the param for them for the rest of the run instead of failing.
+        self._no_reasoning_param: set[str] = set()
 
     @property
     def configured(self) -> bool:
@@ -48,6 +51,11 @@ class FireworksClient:
             "max_tokens": max_tokens,
             "temperature": 0.2,
         }
+        # Disable hidden reasoning: thinking models (minimax-m3) otherwise
+        # burn the token budget reasoning and return empty/truncated content
+        # after ~25s. Dropped per-model if the API rejects the param.
+        if model not in self._no_reasoning_param:
+            payload["reasoning_effort"] = "none"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -70,6 +78,13 @@ class FireworksClient:
                 if attempt < self.RETRIES:
                     time.sleep(self.BACKOFF_SECONDS)
                 continue
+            if resp.status_code in (400, 422) and "reasoning_effort" in payload:
+                # Model rejected the reasoning_effort param. Remember it,
+                # drop the param, and re-issue ONCE (recursion is bounded:
+                # the model is now in the reject set, so no param next time).
+                self._no_reasoning_param.add(model)
+                return self.chat(model=model, system=system, user=user,
+                                 max_tokens=max_tokens, timeout=timeout)
             if resp.status_code >= 400:
                 # Auth / unknown model / bad request: permanent. Retrying
                 # would waste another full timeout — fail fast, caller

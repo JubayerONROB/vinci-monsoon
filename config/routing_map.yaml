@@ -52,7 +52,10 @@ escalation_policy:
     logical_reasoning: always   # force_remote
     code_debugging: always      # force_remote
     code_generation: always     # force_remote
-    factual_knowledge: lenient
+    # Gate insurance: factual is the largest category AND the classifier's
+    # misroute default — a weak local 3B answer here is the biggest accuracy
+    # leak. general role -> minimax-m3 (serverless, reasoning disabled).
+    factual_knowledge: always
     sentiment: lenient
     summarization: lenient
     ner: lenient

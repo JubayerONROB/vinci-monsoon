@@ -71,6 +71,9 @@ class Router:
         self.allowed = allowed_models()
         self.limits = self.cfg.get("limits", {})
         self.thresholds = self.cfg.get("thresholds", {})
+        # Safety net: if the GGUF failed to load (heuristic backend), local
+        # answers would be echo templates — force EVERYTHING remote instead.
+        self.force_all_remote = getattr(local_model, "backend", "") == "heuristic"
 
     # ------------------------------------------------------------------ #
     # role -> concrete allowed model ID                                   #
@@ -113,6 +116,8 @@ class Router:
         return None
 
     def should_answer_locally(self, decision: dict, prompt: str) -> bool:
+        if self.force_all_remote:
+            return False
         policy_cfg = self.cfg.get("escalation_policy", {})
         policy = policy_cfg.get("overrides", {}).get(
             decision["intent"], policy_cfg.get("default", "strict")

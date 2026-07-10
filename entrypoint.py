@@ -31,9 +31,9 @@ OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 # Soft ceiling on total runtime, configurable via env. Once elapsed time
 # crosses it we STOP escalating to Fireworks and answer every remaining task
 # with the local model only: a possibly-weaker local answer always beats a
-# TIMEOUT, which zeros the whole submission. 510s leaves 90s of margin
+# TIMEOUT, which zeros the whole submission. 480s leaves 2 minutes of margin
 # inside the 10-minute hard cap.
-TIME_BUDGET_SECONDS = float(os.environ.get("TIME_BUDGET_SECONDS", "510"))
+TIME_BUDGET_SECONDS = float(os.environ.get("TIME_BUDGET_SECONDS", "480"))
 
 
 def _fallback_answer(prompt: str, router: Router) -> str:
@@ -60,6 +60,12 @@ def main() -> int:
     router = Router(local_model, FireworksClient())
     # Resolved role -> model map (from runtime ALLOWED_MODELS, never hardcoded)
     print(f"resolved model map: {router.resolved_map()}", flush=True)
+    if router.force_all_remote:
+        print(
+            "WARNING: local GGUF unavailable (heuristic backend) — forcing "
+            "ALL categories remote for this run",
+            flush=True,
+        )
 
     results = []
     budget_hit = False
