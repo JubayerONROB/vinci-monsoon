@@ -60,6 +60,7 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(results, fh, ensure_ascii=False, indent=1)
+    from datetime import datetime, timezone
     diag = {
         # model_load_secs is read here (end of run) so a lazy load that
         # happened mid-run is captured; 0.0 means the GGUF never loaded.
@@ -67,6 +68,12 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
         "model_loaded": getattr(local_model, "model_loaded", False),
         "startup_secs": runinfo.get("startup_secs"),
         "total_elapsed_secs": round(time.time() - CONTAINER_START_TS, 2),
+        # Wall-clock evidence for the organizers: when OUR PROCESS actually
+        # began and ended. If the platform reports TIMEOUT with these two
+        # stamps minutes apart, the overrun happened outside the container.
+        "container_start_utc": datetime.fromtimestamp(
+            CONTAINER_START_TS, tz=timezone.utc).isoformat(),
+        "container_end_utc": datetime.now(tz=timezone.utc).isoformat(),
         "forced_local_tasks": runinfo.get("forced_local_tasks", 0),
         "cutover_elapsed_secs": runinfo.get("cutover_elapsed_secs"),
         "tasks": diag_rows,

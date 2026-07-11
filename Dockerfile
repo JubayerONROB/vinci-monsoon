@@ -23,10 +23,12 @@ ENV CMAKE_ARGS="-DGGML_NATIVE=OFF" FORCE_CMAKE=1
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# 2-3B 4-bit GGUF: ~2 GB file, fits the 4 GB RAM budget with headroom for
-# Python + llama.cpp overhead. Override with:
+# SMALL 0.5B 4-bit GGUF (~0.4 GB): the router escalates 6/8 categories to
+# Fireworks, so the local model only classifies (grammar-constrained) and
+# answers sentiment/summarization. A small file slashes image PULL time —
+# the prime suspect for platform-side timeouts. Override with:
 #   docker build --build-arg MODEL_URL=<other-gguf-url> ...
-ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+ARG MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
 RUN mkdir -p /models && curl -L --fail --retry 3 -o /models/model.gguf "$MODEL_URL"
 
 # ---------- Stage 2: slim runtime -------------------------------------------
