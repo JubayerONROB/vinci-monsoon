@@ -18,6 +18,11 @@ import sys
 import time
 from pathlib import Path
 
+# Process-launch timestamp, taken before any import-heavy work we control:
+# on the 2-vCPU grading box, imports + model probing all count against the
+# 10-minute wall clock, so every budget below is anchored HERE.
+CONTAINER_START_TS = time.time()
+
 # Make repo-root imports work no matter where the script is launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -29,17 +34,20 @@ from src.router.formatting import format_answer                # noqa: E402
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 
-# Dynamic global time guard. Before each task we compute a ceiling that
-# leaves enough runway to answer ALL remaining tasks locally (no network):
-#   ceiling = 540 - remaining_tasks * ~2s, floored at 300s.
-# Crossing it switches every remaining task to LOCAL-ONLY, guaranteeing
-# results.json is written and the container exits well under the 10-min cap.
-HARD_CEILING_SECONDS = float(os.environ.get("HARD_CEILING_SECONDS", "540"))
+# Dynamic global time guard, anchored at PROCESS LAUNCH (not first task):
+# startup/model-load cost on the grading VM counts against the same wall
+# clock. Before each task:
+#   ceiling = HARD_WALL - safety_margin - remaining_tasks * local_estimate
+# floored aggressively so a pathological run still cuts over to LOCAL-ONLY
+# in time to write results.json and exit 0 under the 600s limit.
+HARD_WALL_SECONDS = float(os.environ.get("HARD_WALL_SECONDS", "560"))
+SAFETY_MARGIN_SECONDS = float(os.environ.get("SAFETY_MARGIN_SECONDS", "20"))
 LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "2"))
-MIN_CEILING_SECONDS = 300.0
+MIN_CEILING_SECONDS = 250.0
 
 
-def _write_outputs(results: list, diag_rows: list, full_rows: list) -> None:
+def _write_outputs(results: list, diag_rows: list, full_rows: list,
+                   runinfo: dict, local_model) -> None:
     """Write results.json (clean harness schema), diag.json, AND
     results_full.json (full prompt+answer per task, for offline judging).
 
@@ -50,8 +58,19 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(results, fh, ensure_ascii=False, indent=1)
+    diag = {
+        # model_load_secs is read here (end of run) so a lazy load that
+        # happened mid-run is captured; 0.0 means the GGUF never loaded.
+        "model_load_secs": getattr(local_model, "load_secs", 0.0),
+        "model_loaded": getattr(local_model, "model_loaded", False),
+        "startup_secs": runinfo.get("startup_secs"),
+        "total_elapsed_secs": round(time.time() - CONTAINER_START_TS, 2),
+        "forced_local_tasks": runinfo.get("forced_local_tasks", 0),
+        "cutover_elapsed_secs": runinfo.get("cutover_elapsed_secs"),
+        "tasks": diag_rows,
+    }
     with open(out.parent / "diag.json", "w", encoding="utf-8") as fh:
-        json.dump(diag_rows, fh, ensure_ascii=False, indent=1)
+        json.dump(diag, fh, ensure_ascii=False, indent=1)
     with open(out.parent / "results_full.json", "w", encoding="utf-8") as fh:
         json.dump(full_rows, fh, ensure_ascii=False, indent=1)
 
@@ -65,7 +84,8 @@ def _fallback_answer(prompt: str, router: Router) -> str:
 
 
 def main() -> int:
-    start = time.time()
+    # All budgets count from process launch, not from here.
+    start = CONTAINER_START_TS
 
     try:
         with open(INPUT_PATH, "r", encoding="utf-8") as fh:
@@ -87,15 +107,30 @@ def main() -> int:
             flush=True,
         )
 
+    # Startup instrumentation: how much wall clock did we burn before the
+    # first task? (model_load_secs stays 0 here under lazy loading and is
+    # re-read at write time, after any lazy load has happened.)
+    first_task_ts = time.time()
+    runinfo = {
+        "startup_secs": round(first_task_ts - CONTAINER_START_TS, 2),
+        "forced_local_tasks": 0,
+        "cutover_elapsed_secs": None,
+    }
+    print(
+        f"STARTUP model_load_secs={local_model.load_secs} "
+        f"startup_secs={runinfo['startup_secs']}",
+        file=sys.stderr, flush=True,
+    )
+
     results = []
     diag_rows = []
     full_rows = []
     try:
-        _route_all(tasks, router, results, diag_rows, full_rows, start)
+        _route_all(tasks, router, results, diag_rows, full_rows, start, runinfo)
     finally:
         # Same flush path for success and crash: all three output files are
         # emitted no matter what happened mid-run.
-        _write_outputs(results, diag_rows, full_rows)
+        _write_outputs(results, diag_rows, full_rows, runinfo, local_model)
 
     elapsed = time.time() - start
     print(
@@ -106,20 +141,23 @@ def main() -> int:
     return 0
 
 
-def _route_all(tasks, router, results, diag_rows, full_rows, start):
+def _route_all(tasks, router, results, diag_rows, full_rows, start, runinfo):
     budget_hit = False
     for idx, task in enumerate(tasks):
         task_id = task.get("task_id", "")
         prompt = task.get("prompt", "")
         remaining_tasks = len(tasks) - idx
         ceiling = max(
-            HARD_CEILING_SECONDS - remaining_tasks * LOCAL_EST_SECONDS,
+            HARD_WALL_SECONDS - SAFETY_MARGIN_SECONDS
+            - remaining_tasks * LOCAL_EST_SECONDS,
             MIN_CEILING_SECONDS,
         )
         try:
             if budget_hit or time.time() - start > ceiling:
                 if not budget_hit:
                     budget_hit = True
+                    runinfo["forced_local_tasks"] = remaining_tasks
+                    runinfo["cutover_elapsed_secs"] = round(time.time() - start, 1)
                     print(
                         f"TIME CUTOVER at {time.time() - start:.0f}s "
                         f"(ceiling {ceiling:.0f}s): forcing the remaining "

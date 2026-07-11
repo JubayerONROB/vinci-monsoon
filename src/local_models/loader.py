@@ -12,9 +12,12 @@ Backends, in order of preference:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
+import sys
+import time
 from typing import Optional
 
 from config.prompts import CLASSIFY_SYSTEM, INTENTS, LOCAL_ANSWER_SYSTEM
@@ -41,12 +44,34 @@ class LocalModel:
         self.model_path = model_path or os.environ.get("LOCAL_MODEL_PATH", DEFAULT_MODEL_PATH)
         self._llm = None
         self._grammar = None
-        self.backend = "heuristic"
-        self._try_load_llama()
+        self._load_attempted = False
+        self.load_secs = 0.0  # wall clock of the actual GGUF load (0 = never loaded)
+        # Cheap capability probe only — NO weights are loaded at startup.
+        # Startup cost on the 2-vCPU grading box counts against the 10-min
+        # wall clock, so the multi-GB load is deferred to first actual use.
+        self.backend = "llama.cpp" if self._llama_available() else "heuristic"
 
-    def _try_load_llama(self) -> None:
-        if not os.path.isfile(self.model_path):
+    def _llama_available(self) -> bool:
+        """File exists and llama_cpp is importable — without importing it."""
+        return (
+            os.path.isfile(self.model_path)
+            and importlib.util.find_spec("llama_cpp") is not None
+        )
+
+    @property
+    def model_loaded(self) -> bool:
+        return self._llm is not None
+
+    def _ensure_loaded(self) -> None:
+        """LAZY TRIGGER: called by classify()/generate() on first real use.
+
+        If every task escalates AND classification doesn't need the GGUF
+        (heuristic backend), this never runs and load_secs stays 0.0.
+        """
+        if self._llm is not None or self._load_attempted:
             return
+        self._load_attempted = True
+        t0 = time.time()
         try:
             from llama_cpp import Llama, LlamaGrammar
 
@@ -58,17 +83,22 @@ class LocalModel:
                 verbose=False,
             )
             self._grammar = LlamaGrammar.from_string(_CLASSIFY_GRAMMAR)
-            self.backend = "llama.cpp"
+            self.load_secs = round(time.time() - t0, 2)
+            print(f"GGUF lazy-loaded in {self.load_secs}s",
+                  file=sys.stderr, flush=True)
         except Exception:
-            # Any load failure (bad file, missing lib) degrades to heuristic —
-            # a running agent with weaker routing beats a crashed container.
+            # Load failure when finally needed degrades to heuristic —
+            # a running agent with weaker answers beats a crashed container.
             self._llm = None
+            self.backend = "heuristic"
 
     # ------------------------------------------------------------------ #
     # Stage 1: classification                                            #
     # ------------------------------------------------------------------ #
     def classify(self, task_prompt: str, max_tokens: int = 64) -> dict:
         """Return {"intent","difficulty","confidence"} — always valid."""
+        if self.backend == "llama.cpp":
+            self._ensure_loaded()
         if self._llm is not None:
             try:
                 out = self._llm.create_chat_completion(
@@ -101,6 +131,8 @@ class LocalModel:
     # Stage 2a: local generation                                         #
     # ------------------------------------------------------------------ #
     def generate(self, task_prompt: str, max_tokens: int = 300) -> str:
+        if self.backend == "llama.cpp":
+            self._ensure_loaded()
         if self._llm is not None:
             try:
                 out = self._llm.create_chat_completion(
