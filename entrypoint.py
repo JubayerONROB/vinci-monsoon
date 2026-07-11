@@ -40,9 +40,11 @@ OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 #   ceiling = HARD_WALL - safety_margin - remaining_tasks * local_estimate
 # floored aggressively so a pathological run still cuts over to LOCAL-ONLY
 # in time to write results.json and exit 0 under the 600s limit.
-HARD_WALL_SECONDS = float(os.environ.get("HARD_WALL_SECONDS", "560"))
+HARD_WALL_SECONDS = float(os.environ.get("HARD_WALL_SECONDS", "520"))
 SAFETY_MARGIN_SECONDS = float(os.environ.get("SAFETY_MARGIN_SECONDS", "20"))
-LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "2"))
+# Per-task local-answer estimate for the ceiling. 8s reflects a throttled
+# 2-vCPU box (CI does ~4-12s); a bigger estimate means an EARLIER cutover.
+LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "8"))
 MIN_CEILING_SECONDS = 250.0
 
 

@@ -14,12 +14,10 @@ category_roles:
   summarization: general
   ner: general
   code_debugging: code
-  # A/B lever (reversible one-liner): logic moved BACK to the reasoning role
-  # -> minimax-m3 with reasoning_effort=low. kimi produced an invalid
-  # multi-solution answer on a hard constraint puzzle (hard-logic-01); the
-  # old empty-content failure mode is prevented by reasoning_effort=low,
-  # which didn't exist when logic was first moved to kimi.
-  logical_reasoning: reasoning
+  # A/B verdict: minimax-low EMPTIES on hard puzzles, forcing a second
+  # (kimi) call per task — deadly on a slow-network grading box. Logic rides
+  # the CODE role (kimi answers correctly in ONE call).
+  logical_reasoning: code
   code_generation: code
 
 # --- Role -> model substring hints ------------------------------------------
@@ -77,8 +75,10 @@ limits:
   remote_max_tokens_by_role:
     reasoning: 600   # minimax-m3 math finishes cleanly at 600
     code: 700        # raised from 512: 3 code/logic answers truncated last run
-  remote_timeout_seconds: 18   # per-request; a hung call can't eat the task budget
-  per_task_budget_seconds: 20  # HARD cap on all remote attempts per task combined
+  # Successful Fireworks calls return in 1-3s (per DIAG); these caps exist
+  # only to cut off HUNG calls fast on a slow-network grading box.
+  remote_timeout_seconds: 12   # per-request; hung call cut off in 12s
+  per_task_budget_seconds: 14  # HARD cap on the remote phase of one task
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only
 
 # --- Escalation aggressiveness ------------------------------------------------
