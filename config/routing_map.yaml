@@ -14,10 +14,12 @@ category_roles:
   summarization: general
   ner: general
   code_debugging: code
-  # logical_reasoning deliberately uses the CODE role (kimi-k2p7-code):
-  # minimax-m3's hidden reasoning burns the token budget on hard puzzles and
-  # returns empty content, which used to force a local fallback.
-  logical_reasoning: code
+  # A/B lever (reversible one-liner): logic moved BACK to the reasoning role
+  # -> minimax-m3 with reasoning_effort=low. kimi produced an invalid
+  # multi-solution answer on a hard constraint puzzle (hard-logic-01); the
+  # old empty-content failure mode is prevented by reasoning_effort=low,
+  # which didn't exist when logic was first moved to kimi.
+  logical_reasoning: reasoning
   code_generation: code
 
 # --- Role -> model substring hints ------------------------------------------
@@ -58,7 +60,9 @@ escalation_policy:
     factual_knowledge: always
     sentiment: lenient
     summarization: lenient
-    ner: lenient
+    # Measured leak (judging round): local 3B drops DATE/ORG entities and
+    # emits junk on dense NER -> force remote via general role (minimax-m3).
+    ner: always
 
 # --- Generation limits -------------------------------------------------------
 limits:

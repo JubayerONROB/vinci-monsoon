@@ -19,6 +19,9 @@ _PREAMBLE = re.compile(
 
 _SENTIMENT_LABELS = ("positive", "negative", "neutral", "mixed")
 
+# If the task itself asks for a justification, a bare label would LOSE points.
+_WANTS_JUSTIFICATION = re.compile(r"justify|explain|why|reason|because", re.IGNORECASE)
+
 # Lines that look like structured entity output ("- Maria Sanchez: PERSON")
 _NER_LINE = re.compile(r"^\s*([-*•]|\d+[.)])\s+\S|^\s*\{")
 
@@ -35,14 +38,17 @@ def _strip_preamble(text: str) -> str:
     return stripped or text
 
 
-def format_answer(category: str, text: str) -> str:
+def format_answer(category: str, text: str, prompt: str = "") -> str:
     if not isinstance(text, str) or not text.strip():
         return text
     original = text
     text = _strip_preamble(text.strip())
 
     if category == "sentiment":
-        # Reduce to the single bare label mentioned earliest in the answer.
+        # Bare label ONLY when the prompt just asks for the sentiment; if it
+        # explicitly asks to justify/explain, keep label + justification.
+        if _WANTS_JUSTIFICATION.search(prompt or ""):
+            return text
         head = text.lower()[:120]
         found = [(head.find(lbl), lbl) for lbl in _SENTIMENT_LABELS if lbl in head]
         if found:

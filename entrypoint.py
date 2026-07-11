@@ -171,7 +171,7 @@ def _route_all(tasks, router, results, diag_rows, full_rows, start, runinfo):
             answer, meta = _fallback_answer(prompt, router), {"route": "error", "error": str(exc)}
         cat = meta.get("decision", {}).get("intent", "?")
         if isinstance(answer, str) and answer.strip():
-            answer = format_answer(cat, answer)
+            answer = format_answer(cat, answer, prompt)
         if not isinstance(answer, str) or not answer.strip():
             answer = "No answer available."
         results.append({"task_id": task_id, "answer": answer})
