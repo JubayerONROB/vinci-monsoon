@@ -19,3 +19,4 @@ out/
 tests/out_results.json
 tests/diag.json
 diag.log
+tests/results_full.json

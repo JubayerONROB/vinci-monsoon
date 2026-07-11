@@ -39,8 +39,9 @@ LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "2"))
 MIN_CEILING_SECONDS = 300.0
 
 
-def _write_outputs(results: list, diag_rows: list) -> None:
-    """Write results.json (clean harness schema) AND diag.json beside it.
+def _write_outputs(results: list, diag_rows: list, full_rows: list) -> None:
+    """Write results.json (clean harness schema), diag.json, AND
+    results_full.json (full prompt+answer per task, for offline judging).
 
     Shared flush path: called on the normal exit AND from the crash handler,
     so diagnostics survive even a partially-failed run.
@@ -51,6 +52,8 @@ def _write_outputs(results: list, diag_rows: list) -> None:
         json.dump(results, fh, ensure_ascii=False, indent=1)
     with open(out.parent / "diag.json", "w", encoding="utf-8") as fh:
         json.dump(diag_rows, fh, ensure_ascii=False, indent=1)
+    with open(out.parent / "results_full.json", "w", encoding="utf-8") as fh:
+        json.dump(full_rows, fh, ensure_ascii=False, indent=1)
 
 
 def _fallback_answer(prompt: str, router: Router) -> str:
@@ -86,12 +89,13 @@ def main() -> int:
 
     results = []
     diag_rows = []
+    full_rows = []
     try:
-        _route_all(tasks, router, results, diag_rows, start)
+        _route_all(tasks, router, results, diag_rows, full_rows, start)
     finally:
-        # Same flush path for success and crash: results.json + diag.json
-        # are emitted no matter what happened mid-run.
-        _write_outputs(results, diag_rows)
+        # Same flush path for success and crash: all three output files are
+        # emitted no matter what happened mid-run.
+        _write_outputs(results, diag_rows, full_rows)
 
     elapsed = time.time() - start
     print(
@@ -102,7 +106,7 @@ def main() -> int:
     return 0
 
 
-def _route_all(tasks, router, results, diag_rows, start):
+def _route_all(tasks, router, results, diag_rows, full_rows, start):
     budget_hit = False
     for idx, task in enumerate(tasks):
         task_id = task.get("task_id", "")
@@ -147,6 +151,19 @@ def _route_all(tasks, router, results, diag_rows, start):
             "truncated": bool(meta.get("truncated")),
             "primary_call_secs": t.get("primary_secs", 0),
             "alternate_fired": bool(t.get("alternate_fired")),
+            "total_task_secs": t.get("total_secs", 0),
+        })
+        # Full record (prompt + final answer) for offline answer inspection
+        # and judging; never read by the grading harness.
+        full_rows.append({
+            "task_id": task_id,
+            "category": cat,
+            "route": meta.get("route"),
+            "model_used": meta.get("model", "-"),
+            "prompt": prompt,
+            "answer": answer,
+            "finish_reason": meta.get("finish_reason", "-"),
+            "truncated": bool(meta.get("truncated")),
             "total_task_secs": t.get("total_secs", 0),
         })
         print(

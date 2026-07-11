@@ -175,6 +175,9 @@ jobs:
       - name: Show per-task diagnostics (diag.json)
         run: python -m json.tool out/diag.json
 
+      - name: Show full answers (results_full.json)
+        run: python -m json.tool out/results_full.json
+
       # Non-sensitive summary only: counts and booleans, never env values.
       # real_fireworks_success=true means a genuine completion came back;
       # false + fallback>0 with placeholder models usually means an expected
