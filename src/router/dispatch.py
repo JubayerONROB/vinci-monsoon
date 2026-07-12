@@ -159,7 +159,15 @@ class Router:
             "finish_reason": "-", "truncated": False,
             "escalation_cue": self.aggressive_override(task_prompt) or "-",
             "timing": timing,
+            "prompt_tokens": 0, "completion_tokens": 0,
         }
+
+        def _add_usage() -> None:
+            """Accumulate this task's token spend across ALL its attempts —
+            an empty completion still burned tokens and still scores."""
+            pt, ct = getattr(self.fireworks, "last_usage", (0, 0))
+            meta["prompt_tokens"] += pt
+            meta["completion_tokens"] += ct
 
         def _finish_local(route: str = "local", err: Optional[str] = None) -> tuple[str, dict]:
             if err:
@@ -200,6 +208,7 @@ class Router:
                     reasoning_effort=effort,
                 )
                 call_secs = round(time.time() - call_t0, 2)
+                _add_usage()
                 if idx == 0:
                     timing["primary_secs"] = call_secs
                 else:
@@ -215,6 +224,7 @@ class Router:
                 return answer, meta
             except FireworksError as exc:
                 call_secs = round(time.time() - call_t0, 2)
+                _add_usage()
                 if idx == 0:
                     timing["primary_secs"] = call_secs
                 else:

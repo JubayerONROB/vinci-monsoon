@@ -50,6 +50,23 @@ HARD_DEADLINE_SECONDS = float(os.environ.get("HARD_DEADLINE_SECONDS", "500"))
 MAX_WORKERS = max(1, int(os.environ.get("MAX_WORKERS", "5")))
 
 
+def _category_token_breakdown(diag_rows: list) -> dict:
+    """Per-category token sums and means — shows the biggest spend buckets."""
+    cats: dict = {}
+    for row in diag_rows:
+        c = cats.setdefault(row.get("detected_category", "?"), {
+            "tasks": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0,
+        })
+        c["tasks"] += 1
+        c["prompt_tokens"] += row.get("prompt_tokens", 0)
+        c["completion_tokens"] += row.get("completion_tokens", 0)
+        c["total_tokens"] += row.get("prompt_tokens", 0) + row.get("completion_tokens", 0)
+    for c in cats.values():
+        c["mean_total"] = round(c["total_tokens"] / c["tasks"], 1) if c["tasks"] else 0
+    return cats
+
+
 def _write_outputs(results: list, diag_rows: list, full_rows: list,
                    runinfo: dict) -> None:
     """Write results.json (clean harness schema), diag.json, AND
@@ -75,6 +92,12 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
         "max_workers": MAX_WORKERS,
         "hard_deadline_secs": HARD_DEADLINE_SECONDS,
         "deadline_forced_tasks": runinfo.get("deadline_forced_tasks", 0),
+        # Token accounting (ranking metric): totals as reported by the API
+        # client, plus a per-category breakdown for targeting reductions.
+        "total_prompt_tokens": runinfo.get("total_prompt_tokens", 0),
+        "total_completion_tokens": runinfo.get("total_completion_tokens", 0),
+        "total_tokens": runinfo.get("total_tokens", 0),
+        "category_tokens": _category_token_breakdown(diag_rows),
         "tasks": diag_rows,
     }
     with open(out.parent / "diag.json", "w", encoding="utf-8") as fh:
@@ -127,6 +150,10 @@ def main() -> int:
     finally:
         # Same flush path for success and crash: all three output files are
         # emitted no matter what happened mid-run.
+        fw = router.fireworks
+        runinfo["total_prompt_tokens"] = getattr(fw, "total_prompt_tokens", 0)
+        runinfo["total_completion_tokens"] = getattr(fw, "total_completion_tokens", 0)
+        runinfo["total_tokens"] = getattr(fw, "total_tokens", 0)
         _write_outputs(results, diag_rows, full_rows, runinfo)
 
     elapsed = time.time() - CONTAINER_START_TS
@@ -185,6 +212,8 @@ def _route_all(tasks, router, results, diag_rows, full_rows, runinfo):
                 "primary_call_secs": t.get("primary_secs", 0),
                 "alternate_fired": bool(t.get("alternate_fired")),
                 "total_task_secs": t.get("total_secs", 0),
+                "prompt_tokens": meta.get("prompt_tokens", 0),
+                "completion_tokens": meta.get("completion_tokens", 0),
             })
             # Full record (prompt + final answer) for offline answer
             # inspection and judging; never read by the grading harness.
@@ -206,7 +235,8 @@ def _route_all(tasks, router, results, diag_rows, full_rows, runinfo):
                 f"truncated={'yes' if meta.get('truncated') else 'no'} | "
                 f"task_secs={t.get('total_secs', 0)} "
                 f"(primary={t.get('primary_secs', 0)}s, "
-                f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'})",
+                f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'}) | "
+                f"tokens={meta.get('prompt_tokens', 0)}p+{meta.get('completion_tokens', 0)}c",
                 file=sys.stderr, flush=True,
             )
     finally:

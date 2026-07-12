@@ -37,9 +37,11 @@ class FireworksClient:
         self.api_key = os.environ.get("FIREWORKS_API_KEY", "")
         self.base_url = os.environ.get("FIREWORKS_BASE_URL", "").rstrip("/")
         self.total_tokens = 0   # prompt + completion tokens as reported by API
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
         self.calls = 0
         self._lock = threading.Lock()
-        self._tls = threading.local()   # per-thread last_finish_reason
+        self._tls = threading.local()   # per-thread last_finish_reason/usage
         # Models that rejected the reasoning_effort param (400/422): we drop
         # the param for them for the rest of the run instead of failing.
         self._no_reasoning_param: set[str] = set()
@@ -52,6 +54,13 @@ class FireworksClient:
     def last_finish_reason(self):
         """finish_reason of the calling thread's most recent success."""
         return getattr(self._tls, "finish", None)
+
+    @property
+    def last_usage(self) -> tuple[int, int]:
+        """(prompt_tokens, completion_tokens) of the calling thread's most
+        recent call — set even when the call raised EmptyCompletion, since
+        those tokens were still consumed and still count toward the score."""
+        return getattr(self._tls, "usage", (0, 0))
 
     def chat(self, model: str, system: str, user: str,
              max_tokens: int = 512, timeout: float = 25.0,
@@ -79,6 +88,7 @@ class FireworksClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        self._tls.usage = (0, 0)  # reset so a failed call never reports stale usage
 
         last_err: Exception | str | None = None
         for attempt in range(self.RETRIES + 1):
@@ -121,8 +131,14 @@ class FireworksClient:
                 raise FireworksError(f"malformed response (not retried): {exc}")
 
             # Tokens were consumed even if the answer is unusable — count them.
+            usage = data.get("usage", {})
+            pt = usage.get("prompt_tokens", 0)
+            ct = usage.get("completion_tokens", 0)
             with self._lock:
-                self.total_tokens += data.get("usage", {}).get("total_tokens", 0)
+                self.total_tokens += usage.get("total_tokens", 0)
+                self.total_prompt_tokens += pt
+                self.total_completion_tokens += ct
+            self._tls.usage = (pt, ct)
 
             if not text:
                 # Empty content: a same-model retry would just repeat it and
