@@ -1,0 +1,38 @@
+# Manual utility: alias an existing GHCR tag (e.g. tag a rollback anchor
+# like anchor-a9a1d02 from the immutable short-sha tag) without rebuilding.
+# Uses GITHUB_TOKEN (packages:write) — the local PAT lacks that scope.
+name: retag
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Existing tag to alias (e.g. a9a1d02)"
+        type: string
+        required: true
+      dest_tag:
+        description: "New tag name (e.g. anchor-a9a1d02)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Alias tag
+        run: |
+          docker buildx imagetools create \
+            -t "ghcr.io/jubayeronrob/vinci-monsoon:${{ inputs.dest_tag }}" \
+            "ghcr.io/jubayeronrob/vinci-monsoon:${{ inputs.source_tag }}"
+          docker buildx imagetools inspect "ghcr.io/jubayeronrob/vinci-monsoon:${{ inputs.dest_tag }}" | head -5

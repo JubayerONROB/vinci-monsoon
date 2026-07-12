@@ -46,7 +46,7 @@ jobs:
         run: |
           pip install requests PyYAML pytest
           python tests/run_eval.py
-          pytest tests/test_schema.py -q
+          pytest tests/test_schema.py tests/test_verifiers.py -q
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
