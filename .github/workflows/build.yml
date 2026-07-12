@@ -46,7 +46,8 @@ jobs:
         run: |
           pip install requests PyYAML pytest
           python tests/run_eval.py
-          pytest tests/test_schema.py tests/test_verifiers.py -q
+          pytest tests/test_schema.py tests/test_verifiers.py \
+                 tests/test_output_integrity.py tests/test_model_resolution.py -q
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -186,3 +187,29 @@ jobs:
         run: |
           pip install requests PyYAML
           EVAL_LIVE=1 python tests/run_eval.py
+
+      # ======================================================================
+      # GRADING-CONDITIONS SANDBOX: 2 vCPU / 4 GB (the grading box), a
+      # tasks.json with UNSEEN judge-style ids, local lane FORCED ON. The
+      # checker reads the RAW results.json (the judge's view) and fails on
+      # id drift, misalignment, wrapper contamination, blank/fallback
+      # leakage, and objective correctness probes — no LLM self-judging.
+      # (The main run above uses the image default LOCAL_CATEGORIES="" and
+      # therefore validates the pure-remote candidate.)
+      # ======================================================================
+      - name: Sandbox (2cpu/4g, unseen ids, lane ON) — raw judge view
+        run: |
+          mkdir -p sbout
+          docker run --rm --cpus=2 -m 4g \
+            -e FIREWORKS_API_KEY -e FIREWORKS_BASE_URL -e ALLOWED_MODELS \
+            -e LOCAL_CATEGORIES="sentiment,ner,summarization" \
+            -v "$PWD/tests/sandbox_tasks.json:/input/tasks.json:ro" \
+            -v "$PWD/sbout:/output" \
+            ghcr.io/jubayeronrob/vinci-monsoon:latest
+          echo "=== RAW results.json (exactly what the judge reads) ==="
+          cat sbout/results.json
+          echo ""
+          echo "=== integrity + correctness probes ==="
+          python tests/sandbox_check.py tests/sandbox_tasks.json sbout/results.json
+          echo "=== sandbox diag (route split under 4g/2cpu) ==="
+          python -m json.tool sbout/diag.json

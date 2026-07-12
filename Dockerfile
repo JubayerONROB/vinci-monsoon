@@ -46,10 +46,15 @@ COPY entrypoint.py start.sh ./
 # Windows checkouts can introduce CRLF — /bin/sh chokes on it. Strip always.
 RUN sed -i 's/\r$//' /app/start.sh /app/entrypoint.py
 
+# LOCAL LANE KILL-SWITCH: empty = lane OFF (pure proven remote lanes; no
+# sidecar even starts). The grading harness injects no custom env, so this
+# image default IS the submission behavior. Set to
+# "sentiment,ner,summarization" to ship the full hybrid.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     OLLAMA_MODEL=qwen2.5:3b \
-    OLLAMA_KEEP_ALIVE=30m
+    OLLAMA_KEEP_ALIVE=30m \
+    LOCAL_CATEGORIES=""
 
 # The base image's ENTRYPOINT is /bin/ollama — override with our launcher.
 ENTRYPOINT ["/bin/sh", "/app/start.sh"]

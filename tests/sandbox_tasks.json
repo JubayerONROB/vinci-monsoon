@@ -1,0 +1,10 @@
+[
+  { "task_id": "eval_101", "prompt": "Name the three primary colors in the RGB color model and briefly explain why displays use RGB instead of RYB." },
+  { "task_id": "302", "prompt": "A warehouse starts with 2,400 units. In Q1 it sells 37% of stock. In Q2 it restocks 800 units. In Q3 it sells 640 units. How many units remain at the end of Q3?" },
+  { "task_id": "9d41f6a2-0c3b-4d5e-8f70-a1b2c3d4e5f6", "prompt": "Classify the sentiment of this customer review as Positive, Negative, or Neutral and give a one-sentence reason: 'The product arrived two days late and the packaging was damaged, but the item worked perfectly and customer support resolved my complaint within an hour.'" },
+  { "task_id": "grade task 4", "prompt": "Summarize the following passage in exactly three bullet points, each no longer than 15 words:\n\n'Remote work has transformed how companies operate globally. Employees gain flexibility and reduced commute times, leading to reported improvements in work-life balance. However, challenges persist around collaboration, company culture, and the blurring of personal and professional boundaries. Organisations are responding by investing in digital collaboration tools and rethinking office space as a hub for social and creative work rather than daily attendance.'" },
+  { "task_id": "X-05", "prompt": "Extract all named entities from the following text and label each as PERSON, ORGANIZATION, LOCATION, or DATE:\n\n'On March 15 2023, Sundar Pichai announced that Google would open a new AI research lab in Zurich, partnering with ETH Zurich to focus on large language model safety.'" },
+  { "task_id": "eval_106", "prompt": "This function should return the max of a list but has a bug: def get_max(nums): return nums[0]. Find and fix it." },
+  { "task_id": "eval_107", "prompt": "Three friends, Sam, Jo, and Lee, each own a different pet: cat, dog, bird. Sam does not own the bird. Jo owns the dog. Who owns the cat?" },
+  { "task_id": "eval_108", "prompt": "Write a Python function that returns the second-largest number in a list, handling duplicates correctly." }
+]

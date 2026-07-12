@@ -1,8 +1,11 @@
 #!/bin/sh
-# Launcher: Ollama sidecar in the background, agent in the foreground.
-# FAIL-OPEN: if ollama can't start, the agent still runs (pure remote path);
-# the LocalLane in src/local_models/local.py detects the dead sidecar and
-# escalates every task to Fireworks. The agent must never die because of
-# the sidecar, so the launch is fire-and-forget.
-( /bin/ollama serve >/tmp/ollama.log 2>&1 & ) || true
+# Launcher. The Ollama sidecar starts ONLY when the local lane is enabled
+# (LOCAL_CATEGORIES non-empty). With the lane off — the image default — the
+# runtime is pure remote: no sidecar process, no RAM/CPU contention, exactly
+# the proven remote-lane behavior.
+# FAIL-OPEN either way: a sidecar that can't start never kills the agent;
+# the LocalLane detects its absence and escalates every task to Fireworks.
+if [ -n "$LOCAL_CATEGORIES" ]; then
+    ( /bin/ollama serve >/tmp/ollama.log 2>&1 & ) || true
+fi
 exec python3 /app/entrypoint.py

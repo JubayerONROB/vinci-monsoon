@@ -93,6 +93,12 @@ class Router:
             for model_id in self.allowed:
                 if hint.lower() in model_id.lower():
                     return model_id
+        # Hint miss: degrade to the first allowed model that is NOT an
+        # on-demand gemma variant (~$7/hr idle); gemma only if it is
+        # literally the only thing the environment allows.
+        for model_id in self.allowed:
+            if "gemma" not in model_id.lower():
+                return model_id
         return self.allowed[0]
 
     def resolve_model(self, category: str) -> Optional[str]:

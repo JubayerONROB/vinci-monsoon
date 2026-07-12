@@ -130,19 +130,32 @@ def main() -> int:
 
     local_model = get_local_model()
     # Zero-token Ollama lane: fail-open, verifier-gated, deadline-guarded.
-    # If the sidecar never comes up the router silently stays pure-remote.
+    # KILL-SWITCH: LOCAL_CATEGORIES="" (the image default) disables the lane
+    # entirely — no warm-up, no sidecar traffic, pure proven remote lanes.
     lane = LocalLane(deadline_ts=CONTAINER_START_TS + HARD_DEADLINE_SECONDS)
-    lane.warm_async()
+    if lane.categories:
+        lane.warm_async()
+    else:
+        lane = None
+        print("local lane disabled (LOCAL_CATEGORIES empty) — pure remote",
+              flush=True)
     router = Router(local_model, FireworksClient(), local_lane=lane)
     # Resolved role -> model map (from runtime ALLOWED_MODELS, never hardcoded)
     print(f"resolved model map: {router.resolved_map()}", flush=True)
-    print(
-        f"hybrid mode: local lane [{','.join(sorted(lane.categories)) or 'disabled'}] "
-        f"on {lane.model} (0 tokens, verifier-gated), rest remote "
-        f"(max_workers={MAX_WORKERS}, deadline={HARD_DEADLINE_SECONDS:.0f}s, "
-        f"local guard {lane.min_remaining:.0f}s)",
-        flush=True,
-    )
+    if lane is not None:
+        print(
+            f"hybrid mode: local lane [{','.join(sorted(lane.categories))}] "
+            f"on {lane.model} (0 tokens, verifier-gated), rest remote "
+            f"(max_workers={MAX_WORKERS}, deadline={HARD_DEADLINE_SECONDS:.0f}s, "
+            f"local guard {lane.min_remaining:.0f}s)",
+            flush=True,
+        )
+    else:
+        print(
+            f"pure remote mode (max_workers={MAX_WORKERS}, "
+            f"deadline={HARD_DEADLINE_SECONDS:.0f}s)",
+            flush=True,
+        )
 
     first_task_ts = time.time()
     runinfo = {
@@ -203,7 +216,10 @@ def _route_all(tasks, router, results, diag_rows, full_rows, runinfo):
                 answer, meta = _fallback_answer(prompt, router), {"route": "error", "error": str(exc)}
             cat = meta.get("decision", {}).get("intent", "?")
             if isinstance(answer, str) and answer.strip():
-                answer = format_answer(cat, answer, prompt)
+                try:
+                    answer = format_answer(cat, answer, prompt)
+                except Exception:
+                    pass  # formatter must never sink a real answer
             if not isinstance(answer, str) or not answer.strip():
                 answer = "No answer available."
             results.append({"task_id": task_id, "answer": answer})
