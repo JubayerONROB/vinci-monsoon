@@ -33,12 +33,12 @@ category_roles:
 role_model_hints:
   reasoning: ["minimax-m3", "minimax"]   # math_reasoning
   code: ["kimi-k2p7-code", "kimi"]       # code_debugging, code_generation, logic
-  # TOKEN EXPERIMENT (run #42): minimax carries ~110 fixed prompt-overhead
-  # tokens per call vs kimi's ~10 (measured run #39: 17-token question ->
-  # 141 prompt tokens on minimax, 25-token task -> 56 on kimi). The general
-  # categories are shallow enough for kimi. REVERT to minimax if quality
-  # drops in the judged smoke.
-  general: ["kimi-k2p7-code", "kimi"]    # factual, sentiment, summarization, ner
+  # REVERTED from kimi: the kimi re-laning graded 84.2% (16/19) vs 94.7%
+  # on minimax — prime suspect for the -2 tasks. sentiment/ner/summarization
+  # now go LOCAL first (zero tokens, verifier-gated) and only their
+  # escalations plus factual land here, so the minimax prompt-overhead
+  # premium buys accuracy where it matters.
+  general: ["minimax-m3", "minimax"]     # factual + local-lane escalations
 
 # --- Escalation policy per category -----------------------------------------
 # VESTIGIAL in all-remote mode: the GGUF was removed, so the router's

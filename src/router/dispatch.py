@@ -65,9 +65,11 @@ def allowed_models() -> list[str]:
 
 class Router:
     def __init__(self, local_model: LocalModel, fireworks: FireworksClient,
-                 config: Optional[dict] = None):
+                 config: Optional[dict] = None, local_lane=None):
         self.local = local_model
         self.fireworks = fireworks
+        # Verifier-gated Ollama lane (zero scored tokens); None = pure remote.
+        self.local_lane = local_lane
         self.cfg = config or load_config()
         self.allowed = allowed_models()
         self.limits = self.cfg.get("limits", {})
@@ -178,6 +180,26 @@ class Router:
 
         if self.should_answer_locally(decision, task_prompt):
             return _finish_local()
+
+        # ZERO-TOKEN lane: verified local-model answer for safe categories.
+        # try_answer is fail-open — any error/timeout/format-reject returns
+        # None and the task falls through to the normal paid remote path.
+        if self.local_lane is not None:
+            lane_t0 = time.time()
+            local_answer = self.local_lane.try_answer(category, task_prompt)
+            lane_secs = round(time.time() - lane_t0, 2)
+            if local_answer is not None:
+                timing["local_secs"] = lane_secs
+                timing["total_secs"] = round(time.time() - t_start, 2)
+                meta.update(
+                    route="local_model",
+                    model=f"ollama/{self.local_lane.model}",
+                    finish_reason=self.local_lane.last_done_reason or "stop",
+                )
+                return local_answer, meta
+            if lane_secs >= 0.05:
+                timing["local_secs"] = lane_secs
+                meta["local_escalated"] = True
 
         primary = self.resolve_model(category)
         if primary is None:  # ALLOWED_MODELS empty: fallback is all we have

@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.api_clients.fireworks import FireworksClient          # noqa: E402
 from src.local_models.loader import get_local_model            # noqa: E402
+from src.local_models.local import LocalLane                   # noqa: E402
 from src.router.dispatch import Router                         # noqa: E402
 from src.router.formatting import format_answer                # noqa: E402
 
@@ -97,6 +98,10 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
         "total_prompt_tokens": runinfo.get("total_prompt_tokens", 0),
         "total_completion_tokens": runinfo.get("total_completion_tokens", 0),
         "total_tokens": runinfo.get("total_tokens", 0),
+        # Zero-token lane telemetry: how many tasks never touched Fireworks.
+        "local_model_tasks": sum(1 for r in diag_rows if r.get("route") == "local_model"),
+        "local_rule_tasks": 0,  # deterministic fast-path not built (too risky)
+        "remote_tasks": sum(1 for r in diag_rows if r.get("route") == "remote"),
         "category_tokens": _category_token_breakdown(diag_rows),
         "tasks": diag_rows,
     }
@@ -124,13 +129,18 @@ def main() -> int:
         return 1
 
     local_model = get_local_model()
-    router = Router(local_model, FireworksClient())
+    # Zero-token Ollama lane: fail-open, verifier-gated, deadline-guarded.
+    # If the sidecar never comes up the router silently stays pure-remote.
+    lane = LocalLane(deadline_ts=CONTAINER_START_TS + HARD_DEADLINE_SECONDS)
+    lane.warm_async()
+    router = Router(local_model, FireworksClient(), local_lane=lane)
     # Resolved role -> model map (from runtime ALLOWED_MODELS, never hardcoded)
     print(f"resolved model map: {router.resolved_map()}", flush=True)
     print(
-        f"all-remote mode: heuristic classifier, every task dispatched to "
-        f"Fireworks (max_workers={MAX_WORKERS}, "
-        f"deadline={HARD_DEADLINE_SECONDS:.0f}s)",
+        f"hybrid mode: local lane [{','.join(sorted(lane.categories)) or 'disabled'}] "
+        f"on {lane.model} (0 tokens, verifier-gated), rest remote "
+        f"(max_workers={MAX_WORKERS}, deadline={HARD_DEADLINE_SECONDS:.0f}s, "
+        f"local guard {lane.min_remaining:.0f}s)",
         flush=True,
     )
 

@@ -1,32 +1,55 @@
 # =============================================================================
-# SUBMISSION IMAGE — CPU-ONLY, linux/amd64, ALL-REMOTE MODE.
+# SUBMISSION IMAGE — CPU-ONLY, linux/amd64, HYBRID MODE.
 #
-# No local GGUF and no llama-cpp-python: classification uses the deterministic
-# keyword heuristic in src/local_models/loader.py and EVERY task is answered
-# by an allowed Fireworks model (force_all_remote in the router). Rationale:
-#   * three consecutive platform TIMEOUTs while our process finished in ~150s
-#     pointed at image PULL time — this image is ~150 MB vs 2.0 GB before;
-#   * the 0.5B GGUF classifier was unusably inaccurate, and tokens only
-#     matter after the 80% accuracy gate is passed.
-# The grading VM is 4 GB RAM / 2 vCPU with NO GPU — keep this image lean;
-# never add CUDA/ROCm layers.
+# Ollama sidecar + qwen2.5:3b baked at BUILD time (nothing downloads at
+# runtime -> ready <60s). The local lane answers sentiment/ner/summarization
+# for ZERO scored tokens, verifier-gated and fail-open: if the sidecar can't
+# start, the agent silently runs the proven pure-remote path — it must NEVER
+# die because of the sidecar. Everything else goes to Fireworks
+# (FIREWORKS_API_KEY / FIREWORKS_BASE_URL / ALLOWED_MODELS injected at
+# runtime — never baked in).
+#
+# Grading VM: 4 GB RAM / 2 vCPU / no GPU. Do NOT add CUDA/ROCm layers.
+# Rollback anchor: ghcr.io/jubayeronrob/vinci-monsoon:a9a1d02 (pure remote).
 #
 # Build:  docker build --platform linux/amd64 -t hybrid-router:local .
 # =============================================================================
 
-FROM python:3.11-slim
+FROM ollama/ollama:latest
+
+# Python runtime for the agent (the base image is Ubuntu).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt \
+    || pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+
+# Bake the local model INTO the image: start a temporary server, pull, stop.
+# The weights layer ships with the image so runtime never downloads anything.
+ARG LOCAL_MODEL=qwen2.5:3b
+RUN /bin/ollama serve >/tmp/ollama-build.log 2>&1 & \
+    i=0; \
+    until /bin/ollama list >/dev/null 2>&1; do \
+        i=$((i+1)); \
+        if [ "$i" -gt 60 ]; then cat /tmp/ollama-build.log; exit 1; fi; \
+        sleep 2; \
+    done; \
+    /bin/ollama pull "$LOCAL_MODEL" && /bin/ollama list
 
 WORKDIR /app
 COPY src ./src
 COPY config ./config
-COPY entrypoint.py .
+COPY entrypoint.py start.sh ./
+
+# Windows checkouts can introduce CRLF — /bin/sh chokes on it. Strip always.
+RUN sed -i 's/\r$//' /app/start.sh /app/entrypoint.py
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    OLLAMA_MODEL=qwen2.5:3b \
+    OLLAMA_KEEP_ALIVE=30m
 
-# FIREWORKS_API_KEY, FIREWORKS_BASE_URL, ALLOWED_MODELS are injected by the
-# grading harness at runtime — never baked into the image.
-ENTRYPOINT ["python", "entrypoint.py"]
+# The base image's ENTRYPOINT is /bin/ollama — override with our launcher.
+ENTRYPOINT ["/bin/sh", "/app/start.sh"]
