@@ -47,7 +47,9 @@ CATEGORY_STYLE = {
     # Code lanes: code-only is the cheap default; the task prompt overrides
     # when it explicitly wants explanation.
     "code_debugging": "Output only the corrected code in a code block; add prose only if the prompt asks.",
-    "logical_reasoning": "Give the conclusion with a one-line justification, ending with 'Answer: <conclusion>'.",
+    # A/B verdict: conclusion-only broke hard-logic-01 (kimi's visible
+    # reasoning IS its thinking) — step-by-step-brief is the proven floor.
+    "logical_reasoning": "Reason step by step briefly, then end with 'Answer: <conclusion>'.",
     "code_generation": "Output only the code in a single code block; add prose only if the prompt asks.",
 }
 

@@ -31,9 +31,14 @@ category_roles:
 # Short substrings ("kimi", "minimax") so a platform-side ID rev (e.g. a
 # version suffix) still resolves; never full-ID-hardcoded.
 role_model_hints:
-  reasoning: ["minimax-m3", "minimax"]   # math_reasoning, logical_reasoning
-  code: ["kimi-k2p7-code", "kimi"]       # code_debugging, code_generation
-  general: ["minimax-m3", "minimax"]     # factual, sentiment, summarization, ner
+  reasoning: ["minimax-m3", "minimax"]   # math_reasoning
+  code: ["kimi-k2p7-code", "kimi"]       # code_debugging, code_generation, logic
+  # TOKEN EXPERIMENT (run #42): minimax carries ~110 fixed prompt-overhead
+  # tokens per call vs kimi's ~10 (measured run #39: 17-token question ->
+  # 141 prompt tokens on minimax, 25-token task -> 56 on kimi). The general
+  # categories are shallow enough for kimi. REVERT to minimax if quality
+  # drops in the judged smoke.
+  general: ["kimi-k2p7-code", "kimi"]    # factual, sentiment, summarization, ner
 
 # --- Escalation policy per category -----------------------------------------
 # VESTIGIAL in all-remote mode: the GGUF was removed, so the router's
@@ -74,7 +79,7 @@ limits:
   # completion per lane + ~60% headroom). Tokens are the RANKING metric.
   remote_max_tokens: 300       # general lane: worst observed 98ct (factual)
   remote_max_tokens_by_role:
-    reasoning: 450   # math: worst observed 518ct at effort=low; concise style + none targets <300
+    reasoning: 600   # math at effort=low peaks at ~520ct (hard-math-01, run #39)
     code: 500        # logic worst 273ct; debug/codegen <100ct with code-only style
   # Successful Fireworks calls return in 1-3s (per DIAG); this cap exists
   # only to cut off HUNG calls fast on a slow-network grading box. The
@@ -84,10 +89,11 @@ limits:
 
 # --- Escalation aggressiveness ------------------------------------------------
 thresholds:
-  # reasoning_effort for minimax on the REASONING role (math). A/B verdict
-  # pending: "low" solved all math mocks (run #39) but burned 400-500ct each;
-  # this round trials "none". Flip back to "low" here if math regresses.
-  reasoning_role_effort: "none"
+  # reasoning_effort for minimax on the REASONING role (math). A/B VERDICT:
+  # "none" got hard-math-02 WRONG (skipped the drain in phase 1, run #41);
+  # "low" solved every math mock (run #39) and the graded set. Correctness
+  # gates ranking — keep "low".
+  reasoning_role_effort: "low"
   # Categorical classifier confidence maps to a score (high=0.95, low=0.50);
   # it must EXCEED this to stay local. 0.90 means only confident-high stays.
   local_confidence_threshold: 0.90
