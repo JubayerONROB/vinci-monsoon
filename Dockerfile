@@ -19,21 +19,25 @@
 FROM python:3.12-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl ca-certificates \
+        curl ca-certificates zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Official linux-amd64 bundle, then strip EVERY GPU artifact: the grading box
-# is CPU-only, so CUDA/ROCm runners are pure pull-time dead weight.
-RUN curl -fL --retry 3 https://ollama.com/download/ollama-linux-amd64.tgz \
-        -o /tmp/ollama.tgz \
+# Official pinned linux-amd64 bundle (GitHub releases; ollama.com/download
+# 404s for the tarball), then strip EVERY GPU artifact: the grading box is
+# CPU-only, so CUDA/ROCm runners are pure pull-time dead weight.
+ARG OLLAMA_VERSION=v0.31.2
+RUN curl -fL --retry 3 \
+        "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" \
+        -o /tmp/ollama.tar.zst \
     && mkdir -p /opt/ollama \
-    && tar -xzf /tmp/ollama.tgz -C /opt/ollama \
-    && rm /tmp/ollama.tgz \
-    && find /opt/ollama -depth -type d \( -iname 'cuda*' -o -iname 'rocm*' \) \
-         -exec rm -rf {} + \
+    && tar --zstd -xf /tmp/ollama.tar.zst -C /opt/ollama \
+    && rm /tmp/ollama.tar.zst \
+    && ls -la /opt/ollama \
+    && find /opt/ollama -depth -type d \( -iname 'cuda*' -o -iname 'rocm*' \
+         -o -iname 'mlx*' \) -exec rm -rf {} + \
     && find /opt/ollama -type f \( -iname '*cublas*' -o -iname '*cudart*' \
          -o -iname '*nvml*' -o -iname '*hipblas*' -o -iname '*rocblas*' \
-         -o -iname '*amdhip*' \) -delete \
+         -o -iname '*amdhip*' -o -iname '*cuda*' \) -delete \
     && echo "--- ollama payload after GPU strip:" && du -sh /opt/ollama \
     && /opt/ollama/bin/ollama --version
 
