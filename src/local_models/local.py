@@ -266,9 +266,15 @@ class LocalLane:
                 print(f"local lane: warm-up skipped ({type(exc).__name__})", flush=True)
         threading.Thread(target=_warm, daemon=True).start()
 
+    # How long after process launch we still treat sidecar hiccups
+    # (connection refused, 5xx while the model loads) as "starting up".
+    _BIND_WINDOW = 25.0
+    _WARM_WINDOW = 150.0
+
     def _post(self, prompt: str, num_predict: int, timeout: float) -> dict:
-        """One /api/generate call. During startup, connection-refused is
-        retried until the server binds (bounded by the call's own timeout)."""
+        """One /api/generate call. During startup, connection-refused and
+        transient 5xx/429 (model still loading) are retried until the
+        server settles (bounded by the call's own timeout)."""
         call_deadline = time.time() + timeout
         while True:
             try:
@@ -283,6 +289,17 @@ class LocalLane:
                     },
                     timeout=max(5.0, call_deadline - time.time()),
                 )
+                if r.status_code in (429, 500, 502, 503) and \
+                        time.time() - self.launch_ts < self._WARM_WINDOW and \
+                        time.time() < call_deadline - 5:
+                    # Server up but busy/loading — transient during warm-up.
+                    print(f"local lane: transient HTTP {r.status_code} "
+                          f"({r.text[:120]!r}), retrying", flush=True)
+                    time.sleep(2)
+                    continue
+                if r.status_code >= 400:
+                    print(f"local lane: HTTP {r.status_code} "
+                          f"({r.text[:200]!r})", flush=True)
                 r.raise_for_status()
                 return r.json()
             except requests.exceptions.ConnectionError:
@@ -290,7 +307,7 @@ class LocalLane:
                 # seconds — wait only inside a short launch window, so a
                 # genuinely dead sidecar costs seconds, not whole timeouts.
                 if self._first_done or time.time() > call_deadline - 5 \
-                        or time.time() - self.launch_ts > 25:
+                        or time.time() - self.launch_ts > self._BIND_WINDOW:
                     raise
                 time.sleep(2)
 
@@ -326,9 +343,15 @@ class LocalLane:
                 print(f"local lane: escalate {category} "
                       f"({type(exc).__name__})", flush=True)
                 self._consec_errors += 1
-                # Never came up at all, or persistently failing -> stop trying.
-                if (not self._first_done and self._consec_errors >= 2) \
-                        or self._consec_errors >= 3:
+                # Dead-lane verdict: while the model may still be warming,
+                # individual failures just escalate their own task. Only a
+                # server that never binds, or persistent failure after the
+                # warm window, disables the lane for the rest of the run.
+                past_warm = time.time() - self.launch_ts > self._WARM_WINDOW
+                if (not self._first_done and self._consec_errors >= 2
+                        and (past_warm or isinstance(
+                            exc, requests.exceptions.ConnectionError))) \
+                        or self._consec_errors >= 4:
                     self._dead = True
                     print("local lane: disabled after repeated failures "
                           "(fail-open to remote)", flush=True)
