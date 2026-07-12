@@ -114,6 +114,16 @@ jobs:
           fi
           echo "Compressed image size: $(numfmt --to=iec "$SIZE_BYTES") ($SIZE_BYTES bytes)"
           echo "Hackathon cap: 10GB compressed"
+          # HARD GATE: big images are the prime suspect for the graded 0/19
+          # (4.9 GB hybrid scored 0 twice; 50 MB never did). :latest is
+          # already pushed at this point, but a red build means the image is
+          # NOT resubmittable and the anchor stays the submission.
+          LIMIT=2684354560
+          if [ "$SIZE_BYTES" -gt "$LIMIT" ]; then
+            echo "::error::Image ${SIZE_BYTES}B exceeds the 2.5GB slim gate — NOT resubmittable"
+            exit 1
+          fi
+          echo "Slim gate OK (<= 2.5GB)"
 
   # ==========================================================================
   # MANUAL live Fireworks integration test — runs ONLY via workflow_dispatch

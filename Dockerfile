@@ -1,42 +1,68 @@
 # =============================================================================
-# SUBMISSION IMAGE — CPU-ONLY, linux/amd64, HYBRID MODE.
+# SUBMISSION IMAGE — SLIM CPU-ONLY HYBRID, linux/amd64. TARGET <= ~2 GB.
 #
-# Ollama sidecar + qwen2.5:3b baked at BUILD time (nothing downloads at
-# runtime -> ready <60s). The local lane answers sentiment/ner/summarization
-# for ZERO scored tokens, verifier-gated and fail-open: if the sidecar can't
-# start, the agent silently runs the proven pure-remote path — it must NEVER
-# die because of the sidecar. Everything else goes to Fireworks
-# (FIREWORKS_API_KEY / FIREWORKS_BASE_URL / ALLOWED_MODELS injected at
-# runtime — never baked in).
+# The previous hybrid (ollama/ollama base) was 4.9 GB compressed and scored a
+# deterministic 0/19 twice; the 50 MB pure-remote image never scored 0. This
+# image separates "image size" from everything else: slim python base + ONLY
+# the CPU pieces of ollama (GPU/CUDA/ROCm libraries deleted at build) +
+# qwen2.5:3b weights baked at BUILD time (nothing downloads at runtime).
 #
-# Grading VM: 4 GB RAM / 2 vCPU / no GPU. Do NOT add CUDA/ROCm layers.
-# Rollback anchor: ghcr.io/jubayeronrob/vinci-monsoon:a9a1d02 (pure remote).
+# Local lane defaults ON (sentiment,ner,summarization; verifier-gated,
+# fail-open). LOCAL_CATEGORIES="" reverts to the proven pure-remote lanes and
+# the sidecar never even starts. Grading VM: 4 GB RAM / 2 vCPU / no GPU.
+# Rollback anchor: ghcr.io/jubayeronrob/vinci-monsoon:anchor-a9a1d02.
 #
 # Build:  docker build --platform linux/amd64 -t hybrid-router:local .
 # =============================================================================
 
-FROM ollama/ollama:latest
+# ---------- Stage 1: fetch CPU-only ollama + bake the model ------------------
+FROM python:3.12-slim AS builder
 
-# Python runtime for the agent (the base image is Ubuntu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ca-certificates \
+        curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt \
-    || pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+# Official linux-amd64 bundle, then strip EVERY GPU artifact: the grading box
+# is CPU-only, so CUDA/ROCm runners are pure pull-time dead weight.
+RUN curl -fL --retry 3 https://ollama.com/download/ollama-linux-amd64.tgz \
+        -o /tmp/ollama.tgz \
+    && mkdir -p /opt/ollama \
+    && tar -xzf /tmp/ollama.tgz -C /opt/ollama \
+    && rm /tmp/ollama.tgz \
+    && find /opt/ollama -depth -type d \( -iname 'cuda*' -o -iname 'rocm*' \) \
+         -exec rm -rf {} + \
+    && find /opt/ollama -type f \( -iname '*cublas*' -o -iname '*cudart*' \
+         -o -iname '*nvml*' -o -iname '*hipblas*' -o -iname '*rocblas*' \
+         -o -iname '*amdhip*' \) -delete \
+    && echo "--- ollama payload after GPU strip:" && du -sh /opt/ollama \
+    && /opt/ollama/bin/ollama --version
 
-# Bake the local model INTO the image: start a temporary server, pull, stop.
-# The weights layer ships with the image so runtime never downloads anything.
+# Bake qwen2.5:3b INTO the image under a fixed models dir.
 ARG LOCAL_MODEL=qwen2.5:3b
-RUN /bin/ollama serve >/tmp/ollama-build.log 2>&1 & \
+ENV OLLAMA_MODELS=/opt/models
+RUN /opt/ollama/bin/ollama serve >/tmp/ollama-build.log 2>&1 & \
     i=0; \
-    until /bin/ollama list >/dev/null 2>&1; do \
+    until /opt/ollama/bin/ollama list >/dev/null 2>&1; do \
         i=$((i+1)); \
         if [ "$i" -gt 60 ]; then cat /tmp/ollama-build.log; exit 1; fi; \
         sleep 2; \
     done; \
-    /bin/ollama pull "$LOCAL_MODEL" && /bin/ollama list
+    /opt/ollama/bin/ollama pull "$LOCAL_MODEL" && /opt/ollama/bin/ollama list \
+    && du -sh /opt/models
+
+# ---------- Stage 2: slim runtime --------------------------------------------
+FROM python:3.12-slim
+
+# libstdc++/libgomp: the bundled llama runners need them; slim may lack them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libstdc++6 libgomp1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY --from=builder /opt/ollama /opt/ollama
+COPY --from=builder /opt/models /opt/models
 
 WORKDIR /app
 COPY src ./src
@@ -46,15 +72,16 @@ COPY entrypoint.py start.sh ./
 # Windows checkouts can introduce CRLF — /bin/sh chokes on it. Strip always.
 RUN sed -i 's/\r$//' /app/start.sh /app/entrypoint.py
 
-# LOCAL LANE KILL-SWITCH: empty = lane OFF (pure proven remote lanes; no
-# sidecar even starts). The grading harness injects no custom env, so this
-# image default IS the submission behavior. Set to
-# "sentiment,ner,summarization" to ship the full hybrid.
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
+# LOCAL LANE default ON (the kill-switch: set LOCAL_CATEGORIES="" to get the
+# proven pure-remote lanes with no sidecar at all).
+ENV PATH="/opt/ollama/bin:${PATH}" \
+    OLLAMA_MODELS=/opt/models \
     OLLAMA_MODEL=qwen2.5:3b \
     OLLAMA_KEEP_ALIVE=30m \
-    LOCAL_CATEGORIES=""
+    LOCAL_CATEGORIES="sentiment,ner,summarization" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-# The base image's ENTRYPOINT is /bin/ollama — override with our launcher.
+# FIREWORKS_API_KEY, FIREWORKS_BASE_URL, ALLOWED_MODELS are injected by the
+# grading harness at runtime — never baked into the image.
 ENTRYPOINT ["/bin/sh", "/app/start.sh"]
