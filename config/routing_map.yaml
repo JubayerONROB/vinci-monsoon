@@ -70,13 +70,12 @@ limits:
   local_max_tokens: 180        # local answers cost 0 tokens but MUST be fast:
                                # the 2-vCPU grading box generates ~2-4x slower
                                # than CI, and 300 tokens there risks the 30s cap
-  remote_max_tokens: 512       # cap Fireworks output tokens (they score!)
-  # Per-ROLE output caps override remote_max_tokens. Long-reasoning models
-  # (minimax-m3) can blow the request timeout on hard logic/math; a tighter
-  # cap makes generation finish inside the window. Other roles keep 512.
+  # Output caps calibrated from run #39 token measurements (biggest observed
+  # completion per lane + ~60% headroom). Tokens are the RANKING metric.
+  remote_max_tokens: 300       # general lane: worst observed 98ct (factual)
   remote_max_tokens_by_role:
-    reasoning: 600   # minimax-m3 math finishes cleanly at 600
-    code: 700        # raised from 512: 3 code/logic answers truncated last run
+    reasoning: 450   # math: worst observed 518ct at effort=low; concise style + none targets <300
+    code: 500        # logic worst 273ct; debug/codegen <100ct with code-only style
   # Successful Fireworks calls return in 1-3s (per DIAG); this cap exists
   # only to cut off HUNG calls fast on a slow-network grading box. The
   # run-level guard is the GLOBAL 500s deadline in entrypoint.py.
@@ -85,6 +84,10 @@ limits:
 
 # --- Escalation aggressiveness ------------------------------------------------
 thresholds:
+  # reasoning_effort for minimax on the REASONING role (math). A/B verdict
+  # pending: "low" solved all math mocks (run #39) but burned 400-500ct each;
+  # this round trials "none". Flip back to "low" here if math regresses.
+  reasoning_role_effort: "none"
   # Categorical classifier confidence maps to a score (high=0.95, low=0.50);
   # it must EXCEED this to stay local. 0.90 means only confident-high stays.
   local_confidence_threshold: 0.90

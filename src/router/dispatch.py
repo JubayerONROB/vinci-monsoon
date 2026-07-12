@@ -194,10 +194,12 @@ class Router:
         last_err: Optional[Exception] = None
         for idx, model_id in enumerate(attempts):
             call_t0 = time.time()
-            # minimax on the reasoning role gets "low" effort (real reasoning
-            # for math/logic); everything else stays "none" for speed and
-            # guaranteed non-empty content.
-            effort = "low" if (role == "reasoning" and "minimax" in model_id.lower()) else "none"
+            # reasoning_effort for minimax on the reasoning role comes from
+            # config (A/B knob: "none" vs "low"); everything else stays
+            # "none" for speed and guaranteed non-empty content.
+            effort = (self.thresholds.get("reasoning_role_effort", "low")
+                      if (role == "reasoning" and "minimax" in model_id.lower())
+                      else "none")
             try:
                 answer = self.fireworks.chat(
                     model=model_id,

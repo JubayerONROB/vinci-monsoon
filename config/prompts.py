@@ -38,13 +38,17 @@ REMOTE_SYSTEM = "Answer in English. Be correct and concise."
 
 CATEGORY_STYLE = {
     "factual_knowledge": "Answer in 1-3 sentences.",
-    "math_reasoning": "Show brief working, then end with 'Answer: <value>'.",
+    # Judge rubric wants the calculation shown or implied — keep brief working.
+    "math_reasoning": "Brief working only, then end with 'Answer: <value>'.",
+    # T03 rubric: the reason must acknowledge BOTH sides of a mixed review.
     "sentiment": "Give the sentiment label (positive/negative/neutral/mixed) and a one-sentence justification.",
     "summarization": "Follow the requested length/format exactly. Output only the summary.",
     "ner": "List each entity as '- <entity>: <TYPE>' using types like PERSON, ORG, LOCATION, DATE.",
-    "code_debugging": "State the bug in one sentence, then give the corrected code in a code block.",
-    "logical_reasoning": "Reason step by step briefly, then end with 'Answer: <conclusion>'.",
-    "code_generation": "Output the code in a single code block with at most one sentence of explanation.",
+    # Code lanes: code-only is the cheap default; the task prompt overrides
+    # when it explicitly wants explanation.
+    "code_debugging": "Output only the corrected code in a code block; add prose only if the prompt asks.",
+    "logical_reasoning": "Give the conclusion with a one-line justification, ending with 'Answer: <conclusion>'.",
+    "code_generation": "Output only the code in a single code block; add prose only if the prompt asks.",
 }
 
 
