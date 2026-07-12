@@ -1,4 +1,5 @@
-# Runtime dependencies (keep lean — these ship in the submission image)
-llama-cpp-python==0.3.9
+# Runtime dependencies (keep lean — these ship in the submission image).
+# llama-cpp-python was removed with the local GGUF: the agent now runs in
+# all-remote mode (heuristic classification, Fireworks for every answer).
 requests>=2.31,<3
 PyYAML>=6.0,<7

@@ -1,13 +1,16 @@
 """Stage 2 — routing decision + category->role->model resolution.
 
-Decision flow per task:
-  1. classify locally (0 tokens)
-  2. apply the per-category escalation policy (config/routing_map.yaml)
-  3. apply the AGGRESSIVE override: prompts containing code syntax, math, or
-     step-by-step cues escalate even when the classifier calls them easy
-  4. answer locally (0 tokens) OR escalate to the role-resolved Fireworks
-     model; if the primary remote model fails, try the OTHER allowed model
-     before falling back to local — never emit an empty answer.
+ALL-REMOTE MODE. Decision flow per task (thread-safe; the entrypoint calls
+``route`` from a ThreadPoolExecutor):
+  1. classify with the deterministic keyword heuristic (0 tokens, instant)
+  2. resolve category -> role -> concrete model ID from runtime
+     ALLOWED_MODELS (never hardcoded; graceful fallback to first allowed)
+  3. call the primary model ONCE (client retries transients internally,
+     4xx permanent). EMPTY content only -> one attempt on the OTHER allowed
+     model. If everything fails -> deterministic non-empty fallback answer.
+There is no per-task budget any more: each HTTP call is bounded by
+remote_timeout_seconds, and the GLOBAL 500s deadline in entrypoint.py is the
+run-level guard.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from typing import Optional
 import yaml
 
 from config.prompts import REMOTE_SYSTEM, remote_user_prompt
-from src.api_clients.fireworks import FireworksClient, FireworksError
+from src.api_clients.fireworks import EmptyCompletion, FireworksClient, FireworksError
 from src.local_models.loader import LocalModel
 from src.router.classifier import classify_task
 
@@ -31,20 +34,17 @@ _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "routing_map.yam
 # the config threshold (local_confidence_threshold) can gate it numerically.
 _CONFIDENCE_SCORE = {"high": 0.95, "low": 0.50}
 
-# --- Aggressive escalation cues (checked BEFORE accepting a local answer) ---
-# Code syntax / language names
+# --- Aggressive escalation cues (kept for diag visibility) ------------------
 _CODE_CUES = re.compile(
     r"(def |class |return\b|function\b|=>|;|\{|\}|import |print\(|"
     r"\bpython\b|\bjavascript\b|\bjava\b|\bc\+\+\b|\bsql\b|\brust\b|\bbug\b)",
     re.IGNORECASE,
 )
-# Math symbols / multi-step calculation words
 _MATH_CUES = re.compile(
     r"(\d+\s*[+\-*/^=]\s*\d+|%|\bpercent|\bcalculate\b|\bhow many\b|\baverage\b|"
     r"\bsum\b|\btotal\b|\bprofit\b|\bratio\b|\brate\b|\bprojection\b)",
     re.IGNORECASE,
 )
-# Explicit reasoning cues
 _REASONING_CUES = re.compile(
     r"(step[- ]by[- ]step|explain your reasoning|deduce|puzzle|constraint|"
     r"each own|who owns|what is the order)",
@@ -72,8 +72,8 @@ class Router:
         self.allowed = allowed_models()
         self.limits = self.cfg.get("limits", {})
         self.thresholds = self.cfg.get("thresholds", {})
-        # Safety net: if the GGUF failed to load (heuristic backend), local
-        # answers would be echo templates — force EVERYTHING remote instead.
+        # Heuristic backend (always, since the GGUF was removed) forces
+        # EVERY task remote — local text is only the last-resort fallback.
         self.force_all_remote = getattr(local_model, "backend", "") == "heuristic"
 
     # ------------------------------------------------------------------ #
@@ -102,12 +102,11 @@ class Router:
         return {role: self.resolve_role(role) for role in roles}
 
     # ------------------------------------------------------------------ #
-    # escalation decision                                                #
+    # escalation decision (vestigial: force_all_remote is always true)    #
     # ------------------------------------------------------------------ #
     @staticmethod
     def aggressive_override(prompt: str) -> Optional[str]:
-        """Return the cue type if the prompt should escalate regardless of
-        the classifier's opinion, else None."""
+        """Return the cue type detected in the prompt (diag only)."""
         if _CODE_CUES.search(prompt):
             return "code_cue"
         if _MATH_CUES.search(prompt):
@@ -127,31 +126,24 @@ class Router:
             return False
         if decision["difficulty"] != "shallow":
             return False
-        # Confidence gate: categorical confidence maps to a score which must
-        # EXCEED the config threshold (default 0.90) to stay local.
         conf = _CONFIDENCE_SCORE.get(decision.get("confidence"), 0.0)
         if conf <= self.thresholds.get("local_confidence_threshold", 0.90):
-            return False
-        # Aggressive cue check runs LAST, before accepting a local answer —
-        # but NOT for sentiment/summarization/ner: a stray digit or code
-        # fragment inside a review/passage must not escalate those.
-        if decision["intent"] not in ("sentiment", "summarization", "ner") and \
-                self.thresholds.get("aggressive_escalation", True) and \
-                self.aggressive_override(prompt):
             return False
         return True
 
     # ------------------------------------------------------------------ #
-    # full pipeline for one task                                         #
+    # full pipeline for one task (runs inside a worker thread)            #
     # ------------------------------------------------------------------ #
     def route(self, task_prompt: str) -> tuple[str, dict]:
         """Return (answer, meta). meta records how the task was routed,
         including per-call wall-clock timing.
 
-        HARD per-task budget: all remote attempts combined must fit inside
-        per_task_budget_seconds (~20s). Each request's timeout is clamped to
-        the budget remainder, so a slow primary consumes the budget and the
-        alternate is skipped — one slow task can never sink the run.
+        Remote attempts: primary model once (the client already retries
+        transient failures internally with backoff). ONLY an EMPTY
+        completion triggers one attempt on the other allowed model —
+        empties are model-specific (hidden reasoning), so the sibling
+        model usually rescues the task. Any other failure goes straight
+        to the deterministic fallback: no unbounded retry chains.
         """
         t_start = time.time()
         timing = {"primary_secs": 0.0, "alternate_fired": False,
@@ -180,26 +172,19 @@ class Router:
             return _finish_local()
 
         primary = self.resolve_model(category)
-        if primary is None:  # ALLOWED_MODELS empty: local is all we have
+        if primary is None:  # ALLOWED_MODELS empty: fallback is all we have
             return _finish_local()
 
         role = self.cfg["category_roles"].get(category, "general")
         max_tokens = self.limits.get("remote_max_tokens_by_role", {}).get(
             role, self.limits.get("remote_max_tokens", 512)
         )
-        task_budget = self.limits.get("per_task_budget_seconds", 14)
         req_timeout = self.limits.get("remote_timeout_seconds", 12)
-        # ONE remote attempt per task, then local. The alternate-model rescue
-        # is DISABLED: on a slow-network grading box it doubles the per-task
-        # worst case (2 x timeout), which is exactly the arithmetic that
-        # times out the whole run. On failure/empty -> straight to local.
+        # Primary, then (on EMPTY content only) the other allowed model.
+        alternate = next((m for m in self.allowed if m != primary), None)
+        attempts = [primary]
         last_err: Optional[Exception] = None
-        for idx, model_id in enumerate([primary]):
-            remaining = task_budget - (time.time() - t_start)
-            if remaining < 3:
-                # Not enough runway for another remote attempt — the
-                # alternate must never push a task past the budget.
-                break
+        for idx, model_id in enumerate(attempts):
             call_t0 = time.time()
             # minimax on the reasoning role gets "low" effort (real reasoning
             # for math/logic); everything else stays "none" for speed and
@@ -211,7 +196,7 @@ class Router:
                     system=REMOTE_SYSTEM,
                     user=remote_user_prompt(category, task_prompt),
                     max_tokens=max_tokens,
-                    timeout=min(req_timeout, remaining),
+                    timeout=req_timeout,
                     reasoning_effort=effort,
                 )
                 call_secs = round(time.time() - call_t0, 2)
@@ -236,9 +221,15 @@ class Router:
                     timing["alternate_fired"] = True
                     timing["alternate_secs"] = call_secs
                 last_err = exc
+                # Empty completion is the ONE case worth a sibling-model
+                # attempt; everything else (auth, 4xx, exhausted retries)
+                # would fail there too.
+                if isinstance(exc, EmptyCompletion) and alternate is not None \
+                        and len(attempts) == 1:
+                    attempts.append(alternate)
 
-        # Remote attempts failed or budget exhausted — degrade to local.
-        return _finish_local("local_fallback", str(last_err) if last_err else "task budget exhausted")
+        # Remote attempts failed — degrade to the deterministic fallback.
+        return _finish_local("local_fallback", str(last_err) if last_err else "remote unavailable")
 
     def _local_answer(self, task_prompt: str) -> str:
         return self.local.generate(

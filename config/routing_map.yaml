@@ -36,8 +36,10 @@ role_model_hints:
   general: ["minimax-m3", "minimax"]     # factual, sentiment, summarization, ner
 
 # --- Escalation policy per category -----------------------------------------
-# Decides when we trust the LOCAL model's answer (0 tokens) vs escalate to
-# Fireworks. Values:
+# VESTIGIAL in all-remote mode: the GGUF was removed, so the router's
+# force_all_remote path always fires and every task escalates regardless of
+# this section. Kept for documentation and as the policy if a local model
+# ever returns. Values:
 #   strict  -> local only if difficulty == shallow AND confidence == high
 #   lenient -> local whenever difficulty == shallow (low confidence tolerated)
 #   always  -> always escalate to Fireworks, never answer locally
@@ -75,10 +77,10 @@ limits:
   remote_max_tokens_by_role:
     reasoning: 600   # minimax-m3 math finishes cleanly at 600
     code: 700        # raised from 512: 3 code/logic answers truncated last run
-  # Successful Fireworks calls return in 1-3s (per DIAG); these caps exist
-  # only to cut off HUNG calls fast on a slow-network grading box.
+  # Successful Fireworks calls return in 1-3s (per DIAG); this cap exists
+  # only to cut off HUNG calls fast on a slow-network grading box. The
+  # run-level guard is the GLOBAL 500s deadline in entrypoint.py.
   remote_timeout_seconds: 12   # per-request; hung call cut off in 12s
-  per_task_budget_seconds: 14  # HARD cap on the remote phase of one task
   classify_prompt_chars: 1500  # truncate very long prompts for stage-1 only
 
 # --- Escalation aggressiveness ------------------------------------------------

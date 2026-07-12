@@ -6,6 +6,12 @@ Contract with the grading harness:
   * exit 0 on success, non-zero on failure
   * total runtime < 10 min, per-request < 30 s, ready < 60 s
 
+ALL-REMOTE + PARALLEL: tasks are dispatched concurrently from a
+ThreadPoolExecutor (MAX_WORKERS, default 5); every task is answered by an
+allowed Fireworks model. A single GLOBAL HARD DEADLINE (500s from process
+launch) bounds the run: any task not returned by then gets a deterministic
+fallback answer so results.json is always complete and schema-valid.
+
 INPUT_PATH / OUTPUT_PATH env vars exist only for local development; the
 defaults match the harness contract.
 """
@@ -16,11 +22,13 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from pathlib import Path
 
 # Process-launch timestamp, taken before any import-heavy work we control:
-# on the 2-vCPU grading box, imports + model probing all count against the
-# 10-minute wall clock, so every budget below is anchored HERE.
+# on the 2-vCPU grading box, everything counts against the 10-minute wall
+# clock, so the global deadline below is anchored HERE.
 CONTAINER_START_TS = time.time()
 
 # Make repo-root imports work no matter where the script is launched from.
@@ -34,22 +42,16 @@ from src.router.formatting import format_answer                # noqa: E402
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 
-# Dynamic global time guard, anchored at PROCESS LAUNCH (not first task):
-# startup/model-load cost on the grading VM counts against the same wall
-# clock. Before each task:
-#   ceiling = HARD_WALL - safety_margin - remaining_tasks * local_estimate
-# floored aggressively so a pathological run still cuts over to LOCAL-ONLY
-# in time to write results.json and exit 0 under the 600s limit.
-HARD_WALL_SECONDS = float(os.environ.get("HARD_WALL_SECONDS", "520"))
-SAFETY_MARGIN_SECONDS = float(os.environ.get("SAFETY_MARGIN_SECONDS", "20"))
-# Per-task local-answer estimate for the ceiling. 8s reflects a throttled
-# 2-vCPU box (CI does ~4-12s); a bigger estimate means an EARLIER cutover.
-LOCAL_EST_SECONDS = float(os.environ.get("LOCAL_EST_SECONDS", "8"))
-MIN_CEILING_SECONDS = 250.0
+# Global hard deadline, anchored at PROCESS LAUNCH. 500s leaves 100s of
+# headroom under the 600s harness limit for result collection, the flush of
+# the three output files, and any still-running worker HTTP call (each is
+# bounded by remote_timeout_seconds plus one retry).
+HARD_DEADLINE_SECONDS = float(os.environ.get("HARD_DEADLINE_SECONDS", "500"))
+MAX_WORKERS = max(1, int(os.environ.get("MAX_WORKERS", "5")))
 
 
 def _write_outputs(results: list, diag_rows: list, full_rows: list,
-                   runinfo: dict, local_model) -> None:
+                   runinfo: dict) -> None:
     """Write results.json (clean harness schema), diag.json, AND
     results_full.json (full prompt+answer per task, for offline judging).
 
@@ -62,10 +64,6 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
         json.dump(results, fh, ensure_ascii=False, indent=1)
     from datetime import datetime, timezone
     diag = {
-        # model_load_secs is read here (end of run) so a lazy load that
-        # happened mid-run is captured; 0.0 means the GGUF never loaded.
-        "model_load_secs": getattr(local_model, "load_secs", 0.0),
-        "model_loaded": getattr(local_model, "model_loaded", False),
         "startup_secs": runinfo.get("startup_secs"),
         "total_elapsed_secs": round(time.time() - CONTAINER_START_TS, 2),
         # Wall-clock evidence for the organizers: when OUR PROCESS actually
@@ -74,8 +72,9 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
         "container_start_utc": datetime.fromtimestamp(
             CONTAINER_START_TS, tz=timezone.utc).isoformat(),
         "container_end_utc": datetime.now(tz=timezone.utc).isoformat(),
-        "forced_local_tasks": runinfo.get("forced_local_tasks", 0),
-        "cutover_elapsed_secs": runinfo.get("cutover_elapsed_secs"),
+        "max_workers": MAX_WORKERS,
+        "hard_deadline_secs": HARD_DEADLINE_SECONDS,
+        "deadline_forced_tasks": runinfo.get("deadline_forced_tasks", 0),
         "tasks": diag_rows,
     }
     with open(out.parent / "diag.json", "w", encoding="utf-8") as fh:
@@ -85,7 +84,7 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
 
 
 def _fallback_answer(prompt: str, router: Router) -> str:
-    """Best-effort local answer used when a task raises unexpectedly."""
+    """Deterministic answer used when a task fails or misses the deadline."""
     try:
         return router._local_answer(prompt)
     except Exception:
@@ -93,9 +92,6 @@ def _fallback_answer(prompt: str, router: Router) -> str:
 
 
 def main() -> int:
-    # All budgets count from process launch, not from here.
-    start = CONTAINER_START_TS
-
     try:
         with open(INPUT_PATH, "r", encoding="utf-8") as fh:
             tasks = json.load(fh)
@@ -105,43 +101,35 @@ def main() -> int:
         return 1
 
     local_model = get_local_model()
-    print(f"local model backend: {local_model.backend}", flush=True)
     router = Router(local_model, FireworksClient())
     # Resolved role -> model map (from runtime ALLOWED_MODELS, never hardcoded)
     print(f"resolved model map: {router.resolved_map()}", flush=True)
-    if router.force_all_remote:
-        print(
-            "WARNING: local GGUF unavailable (heuristic backend) — forcing "
-            "ALL categories remote for this run",
-            flush=True,
-        )
+    print(
+        f"all-remote mode: heuristic classifier, every task dispatched to "
+        f"Fireworks (max_workers={MAX_WORKERS}, "
+        f"deadline={HARD_DEADLINE_SECONDS:.0f}s)",
+        flush=True,
+    )
 
-    # Startup instrumentation: how much wall clock did we burn before the
-    # first task? (model_load_secs stays 0 here under lazy loading and is
-    # re-read at write time, after any lazy load has happened.)
     first_task_ts = time.time()
     runinfo = {
         "startup_secs": round(first_task_ts - CONTAINER_START_TS, 2),
-        "forced_local_tasks": 0,
-        "cutover_elapsed_secs": None,
+        "deadline_forced_tasks": 0,
     }
-    print(
-        f"STARTUP model_load_secs={local_model.load_secs} "
-        f"startup_secs={runinfo['startup_secs']}",
-        file=sys.stderr, flush=True,
-    )
+    print(f"STARTUP startup_secs={runinfo['startup_secs']} "
+          f"max_workers={MAX_WORKERS}", file=sys.stderr, flush=True)
 
     results = []
     diag_rows = []
     full_rows = []
     try:
-        _route_all(tasks, router, results, diag_rows, full_rows, start, runinfo)
+        _route_all(tasks, router, results, diag_rows, full_rows, runinfo)
     finally:
         # Same flush path for success and crash: all three output files are
         # emitted no matter what happened mid-run.
-        _write_outputs(results, diag_rows, full_rows, runinfo, local_model)
+        _write_outputs(results, diag_rows, full_rows, runinfo)
 
-    elapsed = time.time() - start
+    elapsed = time.time() - CONTAINER_START_TS
     print(
         f"done: {len(results)} tasks in {elapsed:.1f}s | "
         f"fireworks calls={router.fireworks.calls} tokens={router.fireworks.total_tokens}",
@@ -150,79 +138,82 @@ def main() -> int:
     return 0
 
 
-def _route_all(tasks, router, results, diag_rows, full_rows, start, runinfo):
-    budget_hit = False
-    for idx, task in enumerate(tasks):
-        task_id = task.get("task_id", "")
-        prompt = task.get("prompt", "")
-        remaining_tasks = len(tasks) - idx
-        ceiling = max(
-            HARD_WALL_SECONDS - SAFETY_MARGIN_SECONDS
-            - remaining_tasks * LOCAL_EST_SECONDS,
-            MIN_CEILING_SECONDS,
-        )
-        try:
-            if budget_hit or time.time() - start > ceiling:
-                if not budget_hit:
-                    budget_hit = True
-                    runinfo["forced_local_tasks"] = remaining_tasks
-                    runinfo["cutover_elapsed_secs"] = round(time.time() - start, 1)
+def _route_all(tasks, router, results, diag_rows, full_rows, runinfo):
+    deadline_ts = CONTAINER_START_TS + HARD_DEADLINE_SECONDS
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    futures = [executor.submit(router.route, task.get("prompt", ""))
+               for task in tasks]
+    try:
+        for task, fut in zip(tasks, futures):
+            task_id = task.get("task_id", "")
+            prompt = task.get("prompt", "")
+            try:
+                remaining = deadline_ts - time.time()
+                # A finished future returns instantly even past the deadline;
+                # an unfinished one past the deadline raises immediately.
+                answer, meta = fut.result(timeout=max(0.0, remaining))
+            except FutureTimeout:
+                runinfo["deadline_forced_tasks"] += 1
+                if runinfo["deadline_forced_tasks"] == 1:
                     print(
-                        f"TIME CUTOVER at {time.time() - start:.0f}s "
-                        f"(ceiling {ceiling:.0f}s): forcing the remaining "
-                        f"{remaining_tasks} task(s) LOCAL-ONLY, no more API calls",
+                        f"GLOBAL DEADLINE hit at "
+                        f"{time.time() - CONTAINER_START_TS:.0f}s: remaining "
+                        f"unfinished tasks get deterministic fallback answers",
                         flush=True,
                     )
-                answer, meta = _fallback_answer(prompt, router), {"route": "deadline_local"}
-            else:
-                answer, meta = router.route(prompt)
-        except Exception as exc:  # one bad task must never sink the run
-            answer, meta = _fallback_answer(prompt, router), {"route": "error", "error": str(exc)}
-        cat = meta.get("decision", {}).get("intent", "?")
-        if isinstance(answer, str) and answer.strip():
-            answer = format_answer(cat, answer, prompt)
-        if not isinstance(answer, str) or not answer.strip():
-            answer = "No answer available."
-        results.append({"task_id": task_id, "answer": answer})
-        print(f"[{task_id}] route={meta.get('route')} model={meta.get('model', '-')}", flush=True)
-        # Per-task diagnostic (stderr + /output/diag.json, non-sensitive):
-        # lets a failed grading run be diagnosed instead of tuning blind.
-        t = meta.get("timing", {})
-        diag_rows.append({
-            "task_id": task_id,
-            "detected_category": cat,
-            "route": meta.get("route"),
-            "model_used": meta.get("model", "-"),
-            "finish_reason": meta.get("finish_reason", "-"),
-            "answer_len": len(answer),
-            "truncated": bool(meta.get("truncated")),
-            "primary_call_secs": t.get("primary_secs", 0),
-            "alternate_fired": bool(t.get("alternate_fired")),
-            "total_task_secs": t.get("total_secs", 0),
-        })
-        # Full record (prompt + final answer) for offline answer inspection
-        # and judging; never read by the grading harness.
-        full_rows.append({
-            "task_id": task_id,
-            "category": cat,
-            "route": meta.get("route"),
-            "model_used": meta.get("model", "-"),
-            "prompt": prompt,
-            "answer": answer,
-            "finish_reason": meta.get("finish_reason", "-"),
-            "truncated": bool(meta.get("truncated")),
-            "total_task_secs": t.get("total_secs", 0),
-        })
-        print(
-            f"DIAG {task_id} | {cat} | {meta.get('route')} | "
-            f"{meta.get('model', '-')} | finish={meta.get('finish_reason', '-')} | "
-            f"answer_len={len(answer)} | "
-            f"truncated={'yes' if meta.get('truncated') else 'no'} | "
-            f"task_secs={t.get('total_secs', 0)} "
-            f"(primary={t.get('primary_secs', 0)}s, "
-            f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'})",
-            file=sys.stderr, flush=True,
-        )
+                answer, meta = _fallback_answer(prompt, router), {"route": "deadline_fallback"}
+            except Exception as exc:  # one bad task must never sink the run
+                answer, meta = _fallback_answer(prompt, router), {"route": "error", "error": str(exc)}
+            cat = meta.get("decision", {}).get("intent", "?")
+            if isinstance(answer, str) and answer.strip():
+                answer = format_answer(cat, answer, prompt)
+            if not isinstance(answer, str) or not answer.strip():
+                answer = "No answer available."
+            results.append({"task_id": task_id, "answer": answer})
+            print(f"[{task_id}] route={meta.get('route')} model={meta.get('model', '-')}", flush=True)
+            # Per-task diagnostic (stderr + /output/diag.json, non-sensitive):
+            # lets a failed grading run be diagnosed instead of tuning blind.
+            t = meta.get("timing", {})
+            diag_rows.append({
+                "task_id": task_id,
+                "detected_category": cat,
+                "route": meta.get("route"),
+                "model_used": meta.get("model", "-"),
+                "finish_reason": meta.get("finish_reason", "-"),
+                "answer_len": len(answer),
+                "truncated": bool(meta.get("truncated")),
+                "primary_call_secs": t.get("primary_secs", 0),
+                "alternate_fired": bool(t.get("alternate_fired")),
+                "total_task_secs": t.get("total_secs", 0),
+            })
+            # Full record (prompt + final answer) for offline answer
+            # inspection and judging; never read by the grading harness.
+            full_rows.append({
+                "task_id": task_id,
+                "category": cat,
+                "route": meta.get("route"),
+                "model_used": meta.get("model", "-"),
+                "prompt": prompt,
+                "answer": answer,
+                "finish_reason": meta.get("finish_reason", "-"),
+                "truncated": bool(meta.get("truncated")),
+                "total_task_secs": t.get("total_secs", 0),
+            })
+            print(
+                f"DIAG {task_id} | {cat} | {meta.get('route')} | "
+                f"{meta.get('model', '-')} | finish={meta.get('finish_reason', '-')} | "
+                f"answer_len={len(answer)} | "
+                f"truncated={'yes' if meta.get('truncated') else 'no'} | "
+                f"task_secs={t.get('total_secs', 0)} "
+                f"(primary={t.get('primary_secs', 0)}s, "
+                f"alt={'yes ' + str(t.get('alternate_secs', 0)) + 's' if t.get('alternate_fired') else 'no'})",
+                file=sys.stderr, flush=True,
+            )
+    finally:
+        # Don't wait for stragglers: queued futures are cancelled, running
+        # HTTP calls are bounded by their request timeout, and the harness
+        # only needs results.json (written by our caller's finally-flush).
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":

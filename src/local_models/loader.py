@@ -1,182 +1,84 @@
-"""CPU-only GGUF model loader with grammar-constrained classification.
+"""Deterministic keyword classifier + last-resort fallback answers.
 
-Backends, in order of preference:
-  1. llama-cpp-python + a local GGUF (the real path used inside the container).
-     Stage-1 classification uses a GBNF grammar so the output is ALWAYS the
-     exact {"intent","difficulty","confidence"} JSON — we never best-effort
-     parse free text.
-  2. A deterministic keyword heuristic. Used only when llama-cpp-python or the
-     model file is missing (e.g. offline dev machines / CI). It keeps the whole
-     pipeline runnable and testable with zero downloads.
+ALL-REMOTE ARCHITECTURE: the bundled GGUF and llama-cpp-python were removed
+(image pull time was the prime suspect for platform-side grading timeouts,
+and the small-GGUF classifier was unusably inaccurate). Stage-1 category
+detection is now a pure keyword heuristic — zero tokens, zero latency, no
+weights — and EVERY task is answered by an allowed Fireworks model
+(``force_all_remote`` in the router fires because backend == "heuristic").
+
+The category only selects the role→model lane and the output-format hint;
+each task prompt carries its own instruction, so a rare misdetection sends
+the task to the other (still strong) allowed model rather than breaking it.
+
+``generate`` remains only as the deterministic, non-empty fallback used when
+every remote attempt fails — results.json must never contain a blank answer.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import json
-import os
 import re
-import sys
-import time
 from typing import Optional
 
-from config.prompts import CLASSIFY_SYSTEM, INTENTS, LOCAL_ANSWER_SYSTEM
-
-DEFAULT_MODEL_PATH = "/models/model.gguf"
-
-# GBNF grammar that forces the exact classification JSON shape. With this,
-# llama.cpp cannot emit anything except a valid decision object.
-_CLASSIFY_GRAMMAR = r"""
-root ::= "{" ws "\"intent\"" ws ":" ws intent ws "," ws "\"difficulty\"" ws ":" ws difficulty ws "," ws "\"confidence\"" ws ":" ws confidence ws "}"
-intent ::= "\"factual_knowledge\"" | "\"math_reasoning\"" | "\"sentiment\"" | "\"summarization\"" | "\"ner\"" | "\"code_debugging\"" | "\"logical_reasoning\"" | "\"code_generation\""
-difficulty ::= "\"shallow\"" | "\"deep\""
-confidence ::= "\"high\"" | "\"low\""
-ws ::= [ \t\n]*
-"""
-
-_DEFAULT_DECISION = {"intent": "factual_knowledge", "difficulty": "deep", "confidence": "low"}
+# --- category cue patterns (checked in order; first hit wins) --------------
+# Debug/codegen before math/logic: code prompts often contain digits too.
+_CODE_SIGNAL = re.compile(r"(def |```|function\b|\bcode\b|\bclass \w+|=>|\breturn\b)", re.IGNORECASE)
+_DEBUG_CUES = re.compile(r"\b(bug|fix|error|incorrect|wrong|doesn'?t work|broken|traceback|exception)\b", re.IGNORECASE)
+_CODEGEN_CUES = re.compile(r"\b(write|implement|create|build)\b.{0,60}\b(function|code|program|script|class|method)\b", re.IGNORECASE)
+_MATH_CUES = re.compile(
+    r"\b(how many|how much|how long|calculate|compute|percent|remain|total|sum|cost|costs|"
+    r"average|speed|rate|profit|revenue|interest|discount|price|at what time|"
+    r"fills?|empties|grows|drops|per (minute|hour|second|day|year))\b|%|\d\s*[+\-*/^=]\s*\d",
+    re.IGNORECASE,
+)
+_LOGIC_CUES = re.compile(
+    r"\b(puzzle|constraints?|deduce|logic|logical|syllogism|true or false|"
+    r"who owns|which day|what is the order|order of the|"
+    r"immediately (left|right)|each (own|owns|speak|speaks|sit|sits|has|have))\b",
+    re.IGNORECASE,
+)
 
 
 class LocalModel:
-    """Wraps either a llama.cpp model or the heuristic fallback."""
+    """Heuristic-only backend. Keeps the pre-all-remote interface so the
+    router, entrypoint, and eval harness are unchanged: ``backend`` is always
+    "heuristic", which trips the router's force_all_remote path."""
 
     def __init__(self, model_path: Optional[str] = None):
-        self.model_path = model_path or os.environ.get("LOCAL_MODEL_PATH", DEFAULT_MODEL_PATH)
-        self._llm = None
-        self._grammar = None
-        self._load_attempted = False
-        self.load_secs = 0.0  # wall clock of the actual GGUF load (0 = never loaded)
-        # Cheap capability probe only — NO weights are loaded at startup.
-        # Startup cost on the 2-vCPU grading box counts against the 10-min
-        # wall clock, so the multi-GB load is deferred to first actual use.
-        self.backend = "llama.cpp" if self._llama_available() else "heuristic"
-
-    def _llama_available(self) -> bool:
-        """File exists and llama_cpp is importable — without importing it."""
-        return (
-            os.path.isfile(self.model_path)
-            and importlib.util.find_spec("llama_cpp") is not None
-        )
-
-    @property
-    def model_loaded(self) -> bool:
-        return self._llm is not None
-
-    def _ensure_loaded(self) -> None:
-        """LAZY TRIGGER: called by classify()/generate() on first real use.
-
-        If every task escalates AND classification doesn't need the GGUF
-        (heuristic backend), this never runs and load_secs stays 0.0.
-        """
-        if self._llm is not None or self._load_attempted:
-            return
-        self._load_attempted = True
-        t0 = time.time()
-        try:
-            from llama_cpp import Llama, LlamaGrammar
-
-            self._llm = Llama(
-                model_path=self.model_path,
-                n_ctx=4096,
-                n_threads=os.cpu_count() or 2,
-                n_gpu_layers=0,  # grading VM is CPU-only
-                verbose=False,
-            )
-            self._grammar = LlamaGrammar.from_string(_CLASSIFY_GRAMMAR)
-            self.load_secs = round(time.time() - t0, 2)
-            print(f"GGUF lazy-loaded in {self.load_secs}s",
-                  file=sys.stderr, flush=True)
-        except Exception:
-            # Load failure when finally needed degrades to heuristic —
-            # a running agent with weaker answers beats a crashed container.
-            self._llm = None
-            self.backend = "heuristic"
+        self.backend = "heuristic"
+        self.load_secs = 0.0      # no weights are ever loaded
+        self.model_loaded = False
 
     # ------------------------------------------------------------------ #
-    # Stage 1: classification                                            #
+    # Stage 1: classification (0 tokens, deterministic)                   #
     # ------------------------------------------------------------------ #
     def classify(self, task_prompt: str, max_tokens: int = 64) -> dict:
         """Return {"intent","difficulty","confidence"} — always valid."""
-        if self.backend == "llama.cpp":
-            self._ensure_loaded()
-        if self._llm is not None:
-            try:
-                out = self._llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": CLASSIFY_SYSTEM},
-                        {"role": "user", "content": task_prompt},
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.0,
-                    grammar=self._grammar,
-                )
-                decision = json.loads(out["choices"][0]["message"]["content"])
-                return self._validate(decision)
-            except Exception:
-                pass
-        return self._heuristic_classify(task_prompt)
-
-    @staticmethod
-    def _validate(decision: dict) -> dict:
-        """Belt-and-braces: the grammar guarantees shape, but never trust IO."""
-        if (
-            decision.get("intent") in INTENTS
-            and decision.get("difficulty") in ("shallow", "deep")
-            and decision.get("confidence") in ("high", "low")
-        ):
-            return decision
-        return dict(_DEFAULT_DECISION)
-
-    # ------------------------------------------------------------------ #
-    # Stage 2a: local generation                                         #
-    # ------------------------------------------------------------------ #
-    def generate(self, task_prompt: str, max_tokens: int = 300) -> str:
-        if self.backend == "llama.cpp":
-            self._ensure_loaded()
-        if self._llm is not None:
-            try:
-                out = self._llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": LOCAL_ANSWER_SYSTEM},
-                        {"role": "user", "content": task_prompt},
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.2,
-                )
-                text = out["choices"][0]["message"]["content"].strip()
-                if text:
-                    return text
-            except Exception:
-                pass
-        return self._heuristic_generate(task_prompt)
-
-    # ------------------------------------------------------------------ #
-    # Heuristic fallback backend (dev machines / emergency only)          #
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _heuristic_classify(prompt: str) -> dict:
-        p = prompt.lower()
-        if "sentiment" in p or "classify the sentiment" in p:
+        p = task_prompt.lower()
+        if "sentiment" in p:
             return {"intent": "sentiment", "difficulty": "shallow", "confidence": "high"}
-        if "summar" in p:
+        if "summar" in p or "tl;dr" in p:
             return {"intent": "summarization", "difficulty": "shallow", "confidence": "high"}
-        if "entit" in p or "named entity" in p:
+        if "entit" in p:
             return {"intent": "ner", "difficulty": "shallow", "confidence": "high"}
-        if ("bug" in p or "fix" in p) and ("def " in p or "function" in p or "code" in p):
-            return {"intent": "code_debugging", "difficulty": "deep", "confidence": "high"}
-        if re.search(r"\bwrite\b.*\b(function|code|program|script)\b", p):
-            return {"intent": "code_generation", "difficulty": "deep", "confidence": "high"}
-        if re.search(r"\d", p) and re.search(r"\b(how many|calculate|percent|%|remain|total|sum|cost)\b", p):
+        if _CODE_SIGNAL.search(task_prompt):
+            if _DEBUG_CUES.search(task_prompt):
+                return {"intent": "code_debugging", "difficulty": "deep", "confidence": "high"}
+            if _CODEGEN_CUES.search(task_prompt):
+                return {"intent": "code_generation", "difficulty": "deep", "confidence": "high"}
+        if re.search(r"\d", task_prompt) and _MATH_CUES.search(task_prompt):
             return {"intent": "math_reasoning", "difficulty": "deep", "confidence": "high"}
-        if re.search(r"\b(each own|who owns|puzzle|constraint|deduce|logic)\b", p):
+        if _LOGIC_CUES.search(task_prompt):
             return {"intent": "logical_reasoning", "difficulty": "deep", "confidence": "high"}
         return {"intent": "factual_knowledge", "difficulty": "shallow", "confidence": "low"}
 
-    @staticmethod
-    def _heuristic_generate(prompt: str) -> str:
-        # Last-resort non-empty answer; only reachable when no GGUF is loaded.
-        head = re.sub(r"\s+", " ", prompt).strip()[:160]
-        return f"Best-effort response (local model unavailable) to: {head}"
+    # ------------------------------------------------------------------ #
+    # Deterministic fallback answer (remote failed / deadline hit)        #
+    # ------------------------------------------------------------------ #
+    def generate(self, task_prompt: str, max_tokens: int = 300) -> str:
+        """Minimal non-empty answer — results.json must never be blank."""
+        head = re.sub(r"\s+", " ", task_prompt).strip()[:160]
+        return f"Best-effort response (remote unavailable) to: {head}"
 
 
 _singleton: Optional[LocalModel] = None
