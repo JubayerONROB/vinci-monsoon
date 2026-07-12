@@ -206,6 +206,8 @@ class Router:
             if lane_secs >= 0.05:
                 timing["local_secs"] = lane_secs
                 meta["local_escalated"] = True
+                meta["local_escalation"] = getattr(
+                    self.local_lane, "last_reject_reason", None) or "skipped"
 
         primary = self.resolve_model(category)
         if primary is None:  # ALLOWED_MODELS empty: fallback is all we have

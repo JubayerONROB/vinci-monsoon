@@ -48,11 +48,21 @@ else:
     # Deterministic correctness probes (objective, no LLM judging)
     probes = {
         "302": lambda a: "1,672" in a or "1672" in a,
+        "eval_105": lambda a: "1.875" in a and "4.50" in a,
+        "eval_106": lambda a: "144" in a,
         "eval_101": lambda a: "red" in a and "green" in a and "blue" in a,
-        "eval_107": lambda a: "sam" in a,
+        "eval_118": lambda a: "sam" in a,
         "X-05": lambda a: all(e in a for e in
                               ("sundar pichai", "google", "zurich", "eth zurich", "march 15 2023")),
+        "eval_114": lambda a: all(e in a for e in
+                                  ("maria sanchez", "fireworks ai", "berlin", "march")),
+        "eval_115": lambda a: all(e in a for e in
+                                  ("lena vogel", "baltic dynamics", "european commission",
+                                   "brussels", "warsaw", "tomasz kowalski", "gdansk")),
         "9d41f6a2-0c3b-4d5e-8f70-a1b2c3d4e5f6":
+            lambda a: any(l in a for l in ("mixed", "positive", "neutral"))
+            and "negative" not in a.split("\n")[0][:40],
+        "eval_108":
             lambda a: any(l in a for l in ("mixed", "positive", "neutral"))
             and "negative" not in a.split("\n")[0][:40],
     }

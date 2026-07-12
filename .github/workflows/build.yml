@@ -207,12 +207,16 @@ jobs:
       # (The main run above uses the image default LOCAL_CATEGORIES="" and
       # therefore validates the pure-remote candidate.)
       # ======================================================================
-      - name: Sandbox (2cpu/4g, unseen ids, lane ON) — raw judge view
+      - name: Sandbox (2cpu/4g NO SWAP, 19 unseen ids, lane ON) — raw judge view
         run: |
           mkdir -p sbout
-          docker run --rm --cpus=2 -m 4g \
+          # --memory-swap == -m disables swap: CI runners have swap but the
+          # grading box likely does not, and swap absence is a prime
+          # difference that could hide OOM behavior our sandboxes never saw.
+          docker run --rm --cpus=2 -m 4g --memory-swap 4g \
             -e FIREWORKS_API_KEY -e FIREWORKS_BASE_URL -e ALLOWED_MODELS \
             -e LOCAL_CATEGORIES="sentiment,ner,summarization" \
+            -e DIAG_ECHO=1 \
             -v "$PWD/tests/sandbox_tasks.json:/input/tasks.json:ro" \
             -v "$PWD/sbout:/output" \
             ghcr.io/jubayeronrob/vinci-monsoon:latest

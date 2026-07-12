@@ -80,6 +80,13 @@ def _write_outputs(results: list, diag_rows: list, full_rows: list,
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(results, fh, ensure_ascii=False, indent=1)
+    if os.environ.get("DIAG_ECHO") == "1":
+        # Echo every shipped row to stderr at write time: if the platform
+        # ever returns container output, this shows exactly what the judge
+        # read — byte for byte.
+        for row in results:
+            print(f"DIAG_ECHO {json.dumps(row, ensure_ascii=False)}",
+                  file=sys.stderr, flush=True)
     from datetime import datetime, timezone
     diag = {
         "startup_secs": runinfo.get("startup_secs"),
@@ -240,6 +247,11 @@ def _route_all(tasks, router, results, diag_rows, full_rows, runinfo):
                 "total_task_secs": t.get("total_secs", 0),
                 "prompt_tokens": meta.get("prompt_tokens", 0),
                 "completion_tokens": meta.get("completion_tokens", 0),
+                # Forensics for graded runs: the EXACT string shipped in
+                # results.json plus why the local lane escalated (if it did).
+                # A third 0/19 must yield a signature, not another mystery.
+                "raw_answer": answer,
+                "local_escalation": meta.get("local_escalation", "-"),
             })
             # Full record (prompt + final answer) for offline answer
             # inspection and judging; never read by the grading harness.
