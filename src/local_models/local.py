@@ -110,15 +110,54 @@ def verify_summarization(prompt: str, answer: str) -> bool:
 
 _NER_LINE_RE = re.compile(r"^[-*•]?\s*[^:]{1,80}:\s*\S")
 
+# Leading words of a capitalized run that are not part of an entity name,
+# plus generic acronyms that capitalized-run extraction would false-flag.
+_CAP_STOPWORDS = {
+    "The", "A", "An", "In", "On", "At", "He", "She", "It", "They", "We", "I",
+    "This", "That", "These", "Those", "However", "But", "And", "Or", "After",
+    "Before", "Then", "From", "With", "During", "Extract", "Label", "Text",
+    "CEO", "CTO", "CFO", "Dr", "Mr", "Mrs", "Ms", "Prof",
+    "AI", "IT", "OK", "TV", "PC", "LLM", "API", "Q1", "Q2", "Q3", "Q4",
+}
 
-def verify_ner(answer: str) -> bool:
-    """Answer must be list-shaped: '<entity>: <TYPE>' (or reversed) lines."""
+_DATE_RE = re.compile(
+    r"\b\d{1,2}\s+[A-Z][a-z]+\s+\d{4}\b|\b[A-Z][a-z]+\s+\d{1,2},?\s+\d{4}\b"
+)
+_CAP_RUN_RE = re.compile(r"\b[A-Z][\w&'-]*(?:\s+[A-Z][\w&'-]*)*")
+
+
+def required_ner_mentions(task_prompt: str) -> list[str]:
+    """Deterministic completeness set: capitalized runs + dates from the
+    SOURCE text (after the instruction prefix). A local NER answer missing
+    any of these escalates — a 3B model silently dropping an entity is the
+    known failure mode, and the T05 rubric fails any missing entity."""
+    text = task_prompt.split(":", 1)[1] if ":" in task_prompt else task_prompt
+    required: list[str] = []
+    for m in _DATE_RE.finditer(text):
+        required.append(m.group(0))
+    for m in _CAP_RUN_RE.finditer(text):
+        words = [w.rstrip(".") for w in m.group(0).split()]
+        while words and words[0].rstrip(".") in _CAP_STOPWORDS:
+            words = words[1:]
+        if words and not all(w in _CAP_STOPWORDS for w in words):
+            required.append(" ".join(words))
+    return required
+
+
+def verify_ner(answer: str, task_prompt: str = "") -> bool:
+    """List-shaped '<entity>: <TYPE>' lines AND no source entity missing."""
     lines = [l.strip() for l in answer.splitlines() if l.strip()]
     if not lines:
         return False
     good = sum(1 for l in lines if _NER_LINE_RE.match(l))
     # Allow one header-ish line, but the body must be entity lines.
-    return good >= max(1, len(lines) - 1) and good >= 1
+    if not (good >= max(1, len(lines) - 1) and good >= 1):
+        return False
+    low = answer.lower()
+    for mention in required_ner_mentions(task_prompt):
+        if mention.lower() not in low:
+            return False
+    return True
 
 
 _LABEL_RE = re.compile(r"\b(positive|negative|neutral|mixed)\b", re.IGNORECASE)
@@ -146,7 +185,7 @@ def verify(category: str, prompt: str, answer: str) -> bool:
     if category == "summarization":
         return verify_summarization(prompt, answer)
     if category == "ner":
-        return verify_ner(answer)
+        return verify_ner(answer, prompt)
     if category == "sentiment":
         return verify_sentiment(prompt, answer)
     return False  # lane only certifies the categories it knows how to check
@@ -274,13 +313,18 @@ class LocalLane:
                 return None
             timeout = 60.0 if not self._first_done else 15.0
             if category == "summarization":
-                timeout += min(45.0, len(task_prompt) / 300.0)
+                # CPU generation is slow and summaries are the longest local
+                # outputs; local time is nearly free (deadline-guarded), so
+                # give them room instead of escalating to a paid call.
+                timeout = max(timeout, 25.0) + min(45.0, len(task_prompt) / 150.0)
             try:
                 data = self._post(build_local_prompt(category, task_prompt),
                                   num_predict=self.num_predict, timeout=timeout)
                 self._first_done = True
                 self._consec_errors = 0
-            except Exception:
+            except Exception as exc:
+                print(f"local lane: escalate {category} "
+                      f"({type(exc).__name__})", flush=True)
                 self._consec_errors += 1
                 # Never came up at all, or persistently failing -> stop trying.
                 if (not self._first_done and self._consec_errors >= 2) \
@@ -293,9 +337,12 @@ class LocalLane:
             done_reason = data.get("done_reason")
             self.last_done_reason = done_reason
             if not text:
+                print(f"local lane: escalate {category} (empty)", flush=True)
                 return None
             if done_reason == "length":
+                print(f"local lane: escalate {category} (length)", flush=True)
                 return None  # cut mid-thought — never submit it
             if not verify(category, task_prompt, text):
+                print(f"local lane: escalate {category} (verifier)", flush=True)
                 return None
             return text
