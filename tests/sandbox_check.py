@@ -11,7 +11,16 @@ structural or catastrophic-content defect we know can produce a uniform 0:
 """
 
 import json
+import re
 import sys
+
+
+def _label(a: str) -> str:
+    """First alphabetic word of the answer = the sentiment label
+    (strips markdown like '**Mixed**' and leading punctuation)."""
+    m = re.search(r"[a-z]+", a)
+    return m.group(0) if m else ""
+
 
 tasks = json.load(open(sys.argv[1], encoding="utf-8"))
 results = json.load(open(sys.argv[2], encoding="utf-8"))
@@ -59,12 +68,13 @@ else:
         "eval_115": lambda a: all(e in a for e in
                                   ("lena vogel", "baltic dynamics", "european commission",
                                    "brussels", "warsaw", "tomasz kowalski", "gdansk")),
+        # Contrastive sentiment: the LABEL must not be Negative. Check the
+        # first word only — the justification legitimately says things like
+        # "negative elements ... outweighed by positive" (run #59 false FAIL).
         "9d41f6a2-0c3b-4d5e-8f70-a1b2c3d4e5f6":
-            lambda a: any(l in a for l in ("mixed", "positive", "neutral"))
-            and "negative" not in a.split("\n")[0][:40],
+            lambda a: _label(a) in ("mixed", "positive", "neutral"),
         "eval_108":
-            lambda a: any(l in a for l in ("mixed", "positive", "neutral"))
-            and "negative" not in a.split("\n")[0][:40],
+            lambda a: _label(a) in ("mixed", "positive", "neutral"),
     }
     for tid, probe in probes.items():
         if tid in by_id and not probe(by_id[tid]):

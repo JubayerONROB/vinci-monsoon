@@ -41,7 +41,9 @@ REMOTE_SYSTEM = "Answer in English, correct and concise."
 CATEGORY_STYLE = {
     "factual_knowledge": "Answer in 1-3 sentences.",
     # Judge rubric wants the calculation shown or implied — keep brief working.
-    "math_reasoning": "Brief working, then end with 'Answer: <value>'.",
+    # "only" is load-bearing: dropping it in run #59 coincided with +234
+    # completion tokens across 5 math tasks. Byte-exact d6fcd4d string.
+    "math_reasoning": "Brief working only, then end with 'Answer: <value>'.",
     # T03 rubric: the reason must acknowledge BOTH sides of a mixed review.
     "sentiment": "Sentiment label (positive/negative/neutral/mixed) + one-sentence justification.",
     "summarization": "Follow the requested length/format exactly. Output only the summary.",
