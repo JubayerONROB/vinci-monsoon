@@ -34,23 +34,25 @@ LOCAL_ANSWER_SYSTEM = (
 # --- Stage 2b: remote (Fireworks) answering ----------------------------------
 # One shared minimal system prompt + a per-category output-format hint.
 # These hints keep OUTPUT tokens low while still satisfying an LLM judge.
-REMOTE_SYSTEM = "Answer in English. Be correct and concise."
+# "Answer in English" stays: kimi/minimax can drift languages and a
+# non-English answer is a guaranteed judge fail — cheap insurance.
+REMOTE_SYSTEM = "Answer in English, correct and concise."
 
 CATEGORY_STYLE = {
     "factual_knowledge": "Answer in 1-3 sentences.",
     # Judge rubric wants the calculation shown or implied — keep brief working.
-    "math_reasoning": "Brief working only, then end with 'Answer: <value>'.",
+    "math_reasoning": "Brief working, then end with 'Answer: <value>'.",
     # T03 rubric: the reason must acknowledge BOTH sides of a mixed review.
-    "sentiment": "Give the sentiment label (positive/negative/neutral/mixed) and a one-sentence justification.",
+    "sentiment": "Sentiment label (positive/negative/neutral/mixed) + one-sentence justification.",
     "summarization": "Follow the requested length/format exactly. Output only the summary.",
     "ner": "List each entity as '- <entity>: <TYPE>' using types like PERSON, ORG, LOCATION, DATE.",
     # Code lanes: code-only is the cheap default; the task prompt overrides
     # when it explicitly wants explanation.
-    "code_debugging": "Output only the corrected code in a code block; add prose only if the prompt asks.",
+    "code_debugging": "Only the corrected code in one code block; prose only if asked.",
     # A/B verdict: conclusion-only broke hard-logic-01 (kimi's visible
     # reasoning IS its thinking) — step-by-step-brief is the proven floor.
     "logical_reasoning": "Reason step by step briefly, then end with 'Answer: <conclusion>'.",
-    "code_generation": "Output only the code in a single code block; add prose only if the prompt asks.",
+    "code_generation": "Only the code in one code block; prose only if asked.",
 }
 
 

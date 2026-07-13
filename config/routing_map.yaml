@@ -80,7 +80,14 @@ limits:
   remote_max_tokens: 300       # general lane: worst observed 98ct (factual)
   remote_max_tokens_by_role:
     reasoning: 600   # math at effort=low peaks at ~520ct (hard-math-01, run #39)
-    code: 500        # logic worst 273ct; debug/codegen <100ct with code-only style
+    code: 500        # role-level ceiling for the code lane
+  # Per-CATEGORY caps override role caps: calibrated from run #55 peaks with
+  # ~2.5-4x headroom so they only stop pathological blowups, never a real
+  # answer. Math is deliberately ABSENT (accuracy-critical, keeps 600).
+  remote_max_tokens_by_category:
+    code_debugging: 250      # peak observed 55ct (code-only style)
+    code_generation: 350     # peak observed 130ct
+    logical_reasoning: 450   # peak observed 297ct (brief-steps style)
   # Successful Fireworks calls return in 1-3s (per DIAG); this cap exists
   # only to cut off HUNG calls fast on a slow-network grading box. The
   # run-level guard is the GLOBAL 500s deadline in entrypoint.py.

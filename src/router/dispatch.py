@@ -214,8 +214,12 @@ class Router:
             return _finish_local()
 
         role = self.cfg["category_roles"].get(category, "general")
-        max_tokens = self.limits.get("remote_max_tokens_by_role", {}).get(
-            role, self.limits.get("remote_max_tokens", 512)
+        # Cap precedence: category > role > global default.
+        max_tokens = self.limits.get("remote_max_tokens_by_category", {}).get(
+            category,
+            self.limits.get("remote_max_tokens_by_role", {}).get(
+                role, self.limits.get("remote_max_tokens", 512)
+            ),
         )
         req_timeout = self.limits.get("remote_timeout_seconds", 12)
         # Primary, then (on EMPTY content only) the other allowed model.

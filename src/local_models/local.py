@@ -239,13 +239,9 @@ def build_local_prompt(category: str, task_prompt: str) -> str:
 # --------------------------------------------------------------------------- #
 
 class LocalLane:
-    """llama.cpp server sidecar (OpenAI-compatible /v1/chat/completions).
-    The lane logic — verifier gating, fail-open, serialization, deadline
-    guard — is runtime-agnostic and unchanged from the Ollama iterations."""
-
     def __init__(self, deadline_ts: Optional[float] = None):
-        self.url = os.environ.get("LOCAL_SERVER_URL", "http://127.0.0.1:8081").rstrip("/")
-        self.model = os.environ.get("LOCAL_MODEL_NAME", "qwen2.5-3b-gguf")
+        self.url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+        self.model = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
         raw = os.environ.get("LOCAL_CATEGORIES", "sentiment,ner,summarization")
         self.categories = {c.strip() for c in raw.split(",") if c.strip()}
         self.num_predict = int(os.environ.get("LOCAL_NUM_PREDICT", "450"))
@@ -253,16 +249,10 @@ class LocalLane:
         self.deadline_ts = deadline_ts
         self.launch_ts = time.time()
         self.last_done_reason: Optional[str] = None
-        self.last_reject_reason: Optional[str] = None  # why the lane escalated
         self._lock = threading.Lock()          # ONE model, 2 cores: serialize
         self._first_done = False
         self._dead = False
         self._consec_errors = 0
-
-    def _max_tokens(self, category: str) -> int:
-        """Per-category output caps: local tokens are free but CPU time is
-        not, and a lower cap also lowers the 'length' escalation risk."""
-        return {"sentiment": 120, "ner": 250}.get(category, self.num_predict)
 
     # ------------------------------------------------------------------ #
     def warm_async(self) -> None:
@@ -276,28 +266,26 @@ class LocalLane:
                 print(f"local lane: warm-up skipped ({type(exc).__name__})", flush=True)
         threading.Thread(target=_warm, daemon=True).start()
 
-    # How long after process launch we still treat sidecar hiccups as
-    # "starting up". llama.cpp's server binds its port only AFTER the
-    # weights finish loading (~20-90s on a 2-vCPU box), so the bind window
-    # must cover the whole load, not just a socket bind.
-    _BIND_WINDOW = 150.0
+    # How long after process launch we still treat sidecar hiccups
+    # (connection refused, 5xx while the model loads) as "starting up".
+    _BIND_WINDOW = 25.0
     _WARM_WINDOW = 150.0
 
     def _post(self, prompt: str, num_predict: int, timeout: float) -> dict:
-        """One /v1/chat/completions call. During startup, connection-refused
-        and transient 5xx/429 (model still loading) are retried until the
+        """One /api/generate call. During startup, connection-refused and
+        transient 5xx/429 (model still loading) are retried until the
         server settles (bounded by the call's own timeout)."""
         call_deadline = time.time() + timeout
         while True:
             try:
                 r = requests.post(
-                    f"{self.url}/v1/chat/completions",
+                    f"{self.url}/api/generate",
                     json={
                         "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": num_predict,
-                        "temperature": 0.2,
+                        "prompt": prompt,
                         "stream": False,
+                        "keep_alive": "30m",
+                        "options": {"num_predict": num_predict, "temperature": 0.2},
                     },
                     timeout=max(5.0, call_deadline - time.time()),
                 )
@@ -346,15 +334,12 @@ class LocalLane:
                 # outputs; local time is nearly free (deadline-guarded), so
                 # give them room instead of escalating to a paid call.
                 timeout = max(timeout, 25.0) + min(45.0, len(task_prompt) / 150.0)
-            self.last_reject_reason = None
             try:
                 data = self._post(build_local_prompt(category, task_prompt),
-                                  num_predict=self._max_tokens(category),
-                                  timeout=timeout)
+                                  num_predict=self.num_predict, timeout=timeout)
                 self._first_done = True
                 self._consec_errors = 0
             except Exception as exc:
-                self.last_reject_reason = f"call:{type(exc).__name__}"
                 print(f"local lane: escalate {category} "
                       f"({type(exc).__name__})", flush=True)
                 self._consec_errors += 1
@@ -371,25 +356,16 @@ class LocalLane:
                     print("local lane: disabled after repeated failures "
                           "(fail-open to remote)", flush=True)
                 return None
-            try:
-                choice = data["choices"][0]
-                text = (choice.get("message", {}).get("content") or "").strip()
-                done_reason = choice.get("finish_reason")
-            except Exception:
-                self.last_reject_reason = "malformed"
-                print(f"local lane: escalate {category} (malformed)", flush=True)
-                return None
+            text = (data.get("response") or "").strip()
+            done_reason = data.get("done_reason")
             self.last_done_reason = done_reason
             if not text:
-                self.last_reject_reason = "empty"
                 print(f"local lane: escalate {category} (empty)", flush=True)
                 return None
             if done_reason == "length":
-                self.last_reject_reason = "length"
                 print(f"local lane: escalate {category} (length)", flush=True)
                 return None  # cut mid-thought — never submit it
             if not verify(category, task_prompt, text):
-                self.last_reject_reason = "verifier"
                 print(f"local lane: escalate {category} (verifier)", flush=True)
                 return None
             return text

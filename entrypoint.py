@@ -64,7 +64,10 @@ def _category_token_breakdown(diag_rows: list) -> dict:
         c["completion_tokens"] += row.get("completion_tokens", 0)
         c["total_tokens"] += row.get("prompt_tokens", 0) + row.get("completion_tokens", 0)
     for c in cats.values():
-        c["mean_total"] = round(c["total_tokens"] / c["tasks"], 1) if c["tasks"] else 0
+        n = c["tasks"] or 1
+        c["mean_prompt"] = round(c["prompt_tokens"] / n, 1)
+        c["mean_completion"] = round(c["completion_tokens"] / n, 1)
+        c["mean_total"] = round(c["total_tokens"] / n, 1)
     return cats
 
 
